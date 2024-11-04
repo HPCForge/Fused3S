@@ -1,0 +1,16 @@
+# ninja log v5
+1	116250	1730614342	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM_kernel.o	75f62a69e6f972e9
+692	62121	1730614667	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM.o	76e8f33f3cd7df43
+4474	72364	1730615335	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM.o	76e8f33f3cd7df43
+8504	280786	1730616226	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM_kernel.o	75f62a69e6f972e9
+685	138653	1730616706	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM_kernel.o	75f62a69e6f972e9
+5097	131787	1730691529	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM_kernel.o	75f62a69e6f972e9
+680	94524	1730692634	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM_kernel.o	75f62a69e6f972e9
+8315	105149	1730693107	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM_kernel.o	75f62a69e6f972e9
+4444	110744	1730693501	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM_kernel.o	75f62a69e6f972e9
+8845	144669	1730694014	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM_kernel.o	75f62a69e6f972e9
+694	88584	1730696804	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM_kernel.o	75f62a69e6f972e9
+3552	147325	1730698458	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM_kernel.o	75f62a69e6f972e9
+4070	104850	1730699308	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM_kernel.o	75f62a69e6f972e9
+730	126085	1730700487	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM_kernel.o	75f62a69e6f972e9
+762	93448	1730700901	/dfs6/pub/zitongl5/TCFMM/src/build/temp.linux-x86_64-3.10/TCFMM_kernel.o	75f62a69e6f972e9

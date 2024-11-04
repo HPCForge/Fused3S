@@ -1,0 +1,7 @@
+.cursorignore
+*.png
+*.pdf
+*.csv
+*.ncu-rep
+*DS_Store
+scripts/Tests/__pycache__/
