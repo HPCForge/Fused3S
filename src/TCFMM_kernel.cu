@@ -12,7 +12,34 @@
 #include <thrust/unique.h>
 #include <torch/extension.h>
 #include <vector>
+#include "ptx.h"
+
 using namespace nvcuda;
+
+union half2_uint32 {
+    half2 h2;
+    uint32_t u32;
+};
+
+// Assume each warp has a 8x8 fp16 matrix in row-major order
+// Each thread starts with 2 consecutive fp16 values as a half2
+// This redistribute elements among threads.
+// Afterwards, each thread owns 2 consecutive fp16 values in column-major order
+__device__ void shfl_transpose_warp(half2 &val, int laneid){
+  int col = laneid/4;
+  int row = (laneid%4)*2;
+  half2 temp[2];
+  temp[0] = __shfl_sync(0xffffffff, val, row*4 + col/2);
+  temp[1] = __shfl_sync(0xffffffff, val, (row+1)*4 + col/2);
+  if((laneid/4)%2 == 0){
+    val.x = temp[0].x;
+    val.y = temp[1].x;
+  }
+  else{
+    val.x = temp[0].y;
+    val.y = temp[1].y;
+  }
+}
 
 //////////////////////////////////////////////////////////////////////
 /// Preprocessing
@@ -376,6 +403,7 @@ __global__ void TC_fusedMM_fp32_inter_cuda_kernel(
 	float *edgeAttention, // result of SDDMM.
 	bool save_edge_attention
 );
+#if BLK_M == 8 && BLK_N == 32 && BLK_K == 16
 __global__ void TC_fusedMM_fp32_inter_m8n32k16_cuda_kernel(
 		const int *__restrict__ TCblock_rowid, 		 // offset of each row window.
 		const uint8_t *__restrict__ TCblocktile_id,  // id of each TC block nonzero element.
@@ -387,6 +415,70 @@ __global__ void TC_fusedMM_fp32_inter_m8n32k16_cuda_kernel(
 		float *output,              // aggreAGNNed output feature matrix.
 		float *edgeAttention, // result of SDDMM.
 		bool save_edge_attention);
+#endif
+
+__global__ void f3s_m16n8k16_cuda_kernel(
+		const int *__restrict__ TCblock_rowid, 		 // offset of each row window.
+		const int *__restrict__ sparse_AToX_idx,     // colid of each TC block nonzero element.
+    const int numNodes,
+    const int embedding_dim,
+		torch::Half *__restrict__ Q, 
+    torch::Half *__restrict__ K, 
+    torch::Half *__restrict__ V,
+		float *output,              // output feature matrix.
+		float *edgeAttention // result of SDDMM
+);
+
+std::vector<torch::Tensor> f3S_forward_cuda(
+    torch::Tensor TCblock_rowid,
+    torch::Tensor sparse_AToX_idx, 
+    int num_nodes, 
+    int embedding_dim,
+    torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
+    bool save_sddmm_result){
+  printf("embedding_dim: %d, BLK_N: %d, TCBLOCK_PER_WARP: %d\n", embedding_dim, BLK_N, TCBLOCK_PER_WARP);
+  int nBlockEmbeddingDim = (embedding_dim + BLK_N - 1) / BLK_N;
+  printf("nBlockEmbeddingDim: %d\n", nBlockEmbeddingDim);
+  int nWarpPerBlock = (nBlockEmbeddingDim + TCBLOCK_PER_WARP - 1) / TCBLOCK_PER_WARP;
+  printf("nWarpPerBlock: %d\n", nWarpPerBlock);
+  const int nRowWindow = TCblock_rowid.size(0) - 1;
+  printf("nRowWindow: %d\n", nRowWindow);
+  int paddedLength = nRowWindow * BLK_M;
+  auto output = torch::zeros({paddedLength, embedding_dim}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  dim3 grid(nRowWindow, 1, 1);
+  dim3 block(WARP_SIZE, nWarpPerBlock, 1);
+  int nTCBlock = sparse_AToX_idx.size(0)/BLK_N;
+	torch::Tensor sddmm_result = torch::zeros({nTCBlock*BLK_M*BLK_N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));;
+  int dynamic_shared_size = nWarpPerBlock * BLK_M * BLK_N * 2 * sizeof(float);
+  float* sddmm_result_ptr = save_sddmm_result ? sddmm_result.data_ptr<float>() : nullptr;
+  printf("starting f3s_m16n8k16\n");
+  #if BLK_M == 16 && BLK_N == 8 && BLK_K == 16
+  f3s_m16n8k16_cuda_kernel<<<grid, block, dynamic_shared_size>>>(
+    TCblock_rowid.data_ptr<int>(), 
+    sparse_AToX_idx.data_ptr<int>(),
+    num_nodes, embedding_dim,
+    Q.data_ptr<torch::Half>(), 
+    K.data_ptr<torch::Half>(), 
+    V.data_ptr<torch::Half>(),
+    output.data_ptr<float>(),
+    sddmm_result_ptr);
+  #else
+  printf("only m16n8k16 is supported\n");
+  #endif
+
+  // check for error
+  cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    // print the CUDA error message and exit
+    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    exit(-1);
+  }
+  cudaDeviceSynchronize();
+  // remove padding
+  output = output.index(
+      {torch::indexing::Slice(0, num_nodes), torch::indexing::Slice()});
+  return {output, sddmm_result};
+}
 
 std::vector<torch::Tensor> fusedMM_forward_cuda(
 	torch::Tensor Rowwindow_offset,
@@ -420,6 +512,7 @@ std::vector<torch::Tensor> fusedMM_forward_cuda(
 	if(use_f32_edge_attention) {
 		edgeAttention = torch::zeros_like(TCblocktile_id).to(torch::kFloat32);
 		if(use_m8n32k16){
+      #if BLK_M == 8 && BLK_N == 32 && BLK_K == 16
 			int dynamic_shared_size = nWarpPerBlock * (BLK_M * BLK_N * sizeof(float) + BLK_N * BLK_N * sizeof(half));
 			TC_fusedMM_fp32_inter_m8n32k16_cuda_kernel<<<grid, block, dynamic_shared_size>>>(
 			Rowwindow_offset.data_ptr<int>(), 
@@ -431,6 +524,9 @@ std::vector<torch::Tensor> fusedMM_forward_cuda(
 			output.data_ptr<float>(),
 			edgeAttention.data_ptr<float>(), 
 			save_edge_attention);
+      #else
+      printf("m8n32k16 is not supported\n");
+      #endif
 		}
 		else{
 			int dynamic_shared_size = nWarpPerBlock * BLK_H * BLK_H * (sizeof(half) + sizeof(float));
@@ -783,6 +879,8 @@ __global__ void TC_fusedMM_fp32_inter_cuda_kernel(
                           spmm_acc_frag, embedding_dim, wmma::mem_row_major);
 }
 
+#if defined(BLK_M) && defined(BLK_N) && defined(BLK_K) && \
+    BLK_M == 8 && BLK_N == 32 && BLK_K == 16
 //////////////////////
 /// Same as fusedMM
 /// Except the partial result for SDDMM is stored in fp32 instead of half
@@ -945,3 +1043,225 @@ __global__ void TC_fusedMM_fp32_inter_m8n32k16_cuda_kernel(
   wmma::store_matrix_sync(output + bid * BLK_M * embedding_dim + wid * BLK_N,
                           spmm_acc_frag, embedding_dim, wmma::mem_row_major);
 }
+#endif
+
+#if defined(BLK_M) && defined(BLK_N) && defined(BLK_K) && \
+    BLK_M == 16 && BLK_N == 8 && BLK_K == 16
+__global__ void f3s_m16n8k16_cuda_kernel(
+		const int *__restrict__ TCblock_rowid, 		 // offset of each row window.
+		const int *__restrict__ sparse_AToX_idx,     // colid of each TC block nonzero element.
+    const int numNodes,
+    const int embedding_dim,
+		torch::Half *__restrict__ Q, 
+    torch::Half *__restrict__ K, 
+    torch::Half *__restrict__ V,
+		float *output,
+		float *sddmm_result
+    ){
+  // grouped by threads. E.g. first blockDim.y * 8 values stores the D_frag of thread 0 of each warp.
+  extern __shared__ float partial_sum[];
+  // 2 16x8 blocks, each block is divided into 2 8x8 subblocks in row major order.
+  __shared__ float sum[BLK_M * BLK_N * 2]; 
+
+  int bid = blockIdx.x;     // block_index == row_window_index
+  int wid = threadIdx.y;    // warp_index handling multi-dimension > 16.
+  int laneid = threadIdx.x; // lanid of each warp.
+  int tid = threadIdx.x + threadIdx.y * blockDim.x;
+  // int warp_offset = wid * BLK_M * BLK_N * 2; // offset for partial_sum
+
+  half2* K_half2 = reinterpret_cast<half2*>(K); 
+  half2* Q_half2 = reinterpret_cast<half2*>(Q);
+  half2* V_half2 = reinterpret_cast<half2*>(V);
+
+  // starting node_id of current row_window.
+  int nid_start = bid * BLK_H; 
+  // ending node_id of the current row_window.
+  int nid_end = min((bid + 1) * BLK_H, numNodes); 
+  assert(nid_start < nid_end);
+ 
+  uint32_t Q_frag[4];
+  uint32_t B_frag[2];
+  float D_frag[8];// sddmm intermediate
+  uint32_t S_frag[4];// sddmm result
+  float O_frag[8];// spmm result
+  float C_frag[4] = {0};
+
+  // Threads of a warp for fetching a 16X16 block of Q.
+  // DOC: https://docs.nvidia.com/cuda/parallel-thread-execution/index.html?highlight=wmma#matrix-fragments-for-mma-m16n8k16-with-floating-point-type
+  // Here I'm swapping columns of Q to make the memory access more coalesced. 
+  // So when loading K, we have to swap the rows accordingly in order to get the same result.
+  int rowIdx = bid * BLK_M + laneid/4;
+  // /2 because half2. *2 because reading 2 consecutive half2. 
+  int colIdx = wid * BLK_K/2 + (laneid%4) * 2;
+  half2_uint32 temp;
+  temp.h2 = Q_half2[rowIdx * embedding_dim/2 + colIdx];
+  Q_frag[0] = temp.u32;
+  temp.h2 = Q_half2[rowIdx * embedding_dim/2 + colIdx + 1];
+  Q_frag[2] = temp.u32;
+  temp.h2 = Q_half2[(rowIdx+8) * embedding_dim/2 + colIdx];
+  Q_frag[1] = temp.u32;
+  temp.h2 = Q_half2[(rowIdx+8) * embedding_dim/2 + colIdx + 1];
+  Q_frag[3] = temp.u32;
+
+	int tcb_id_start = TCblock_rowid[bid];
+	int tcb_id_end = TCblock_rowid[bid + 1];
+  int dense_inds[4];
+  /////////////////////////////////
+  // main loop
+  /////////////////////////////////
+  bool odd_number_of_blocks = (tcb_id_end - tcb_id_start) % 2;
+  bool last_block = false;
+  for (int tcb_id = tcb_id_start; tcb_id < tcb_id_end; tcb_id+=2) {
+    if(tcb_id == tcb_id_end - 1 && odd_number_of_blocks){
+      last_block = true;
+    }
+		// Initialize B_frag from K
+    // Note I'm swapping rows of B_frag because we swapped the columns of A_frag(Q)
+		// Assuming embedding_dim is a multiple of BLK_H
+		// loop over 2 column major blocks in B_frag
+    // index in terms of half2, only affect rowIdx
+    // /2 because half2. *2 because reading 2 consecutive half2. 
+    // +i instead of +i*4 because of the col swap
+    colIdx = (wid * BLK_M)/2 + (laneid % 4)*2; 
+    rowIdx = sparse_AToX_idx[tcb_id * BLK_N + laneid / 4]; 
+    temp.h2 = K_half2[rowIdx * embedding_dim/2 + colIdx];
+    B_frag[0] = temp.u32;
+    temp.h2 = K_half2[rowIdx * embedding_dim/2 + colIdx + 1];
+    B_frag[1] = temp.u32;
+    HMMA16816(D_frag[0], D_frag[1], D_frag[2], D_frag[3], 
+              Q_frag[0], Q_frag[1], Q_frag[2], Q_frag[3], 
+              B_frag[0], B_frag[1], 
+              C_frag[0], C_frag[1], C_frag[2], C_frag[3]);
+    if(tcb_id == 0 && bid == 0){
+      half2 B1 = *reinterpret_cast<half2*>(&B_frag[0]);
+      half2 B2 = *reinterpret_cast<half2*>(&B_frag[1]);
+      half2 Q1 = *reinterpret_cast<half2*>(&Q_frag[0]);
+      half2 Q2 = *reinterpret_cast<half2*>(&Q_frag[1]);
+      half2 Q3 = *reinterpret_cast<half2*>(&Q_frag[2]); 
+      half2 Q4 = *reinterpret_cast<half2*>(&Q_frag[3]);
+      // printf("^^^^ wid: %d, laneid: %d, D_frag[0]: %f, D_frag[1]: %f, D_frag[2]: %f, D_frag[3]: %f, \n", wid, laneid, D_frag[0], D_frag[1], D_frag[2], D_frag[3]);
+      printf("^^^^ wid: %d, laneid: %d, B[0]: %f, B[1]: %f, B[2]: %f, B[3]: %f\n", wid, laneid, __half2float(B1.x), __half2float(B1.y), __half2float(B2.x), __half2float(B2.y));
+      printf("^^^^ wid: %d, laneid: %d, Q[0]: %f, Q[1]: %f, Q[2]: %f, Q[3]: %f\n", wid, laneid, __half2float(Q1.x), __half2float(Q1.y), __half2float(Q2.x), __half2float(Q2.y));
+      printf("^^^^ wid: %d, laneid: %d, Q[4]: %f, Q[5]: %f, Q[6]: %f, Q[7]: %f\n", wid, laneid, __half2float(Q3.x), __half2float(Q3.y), __half2float(Q4.x), __half2float(Q4.y));
+    }
+    if(!last_block){
+      rowIdx = sparse_AToX_idx[(tcb_id+1) * BLK_N + laneid / 4];
+      temp.h2 = K_half2[rowIdx * embedding_dim/2 + colIdx]; // /2 because half2
+      B_frag[0] = temp.u32;
+      temp.h2 = K_half2[rowIdx * embedding_dim/2 + colIdx + 1];
+      B_frag[1] = temp.u32;
+      HMMA16816(D_frag[4], D_frag[5], D_frag[6], D_frag[7], 
+                Q_frag[0], Q_frag[1], Q_frag[2], Q_frag[3], 
+                B_frag[0], B_frag[1], 
+                C_frag[0], C_frag[1], C_frag[2], C_frag[3]);
+    }
+    __syncthreads();
+    if(tcb_id == 0 && bid == 0){
+      half2 B1 = *reinterpret_cast<half2*>(&B_frag[0]);
+      half2 B2 = *reinterpret_cast<half2*>(&B_frag[1]);
+      half2 Q1 = *reinterpret_cast<half2*>(&Q_frag[0]);
+      half2 Q2 = *reinterpret_cast<half2*>(&Q_frag[1]);
+      half2 Q3 = *reinterpret_cast<half2*>(&Q_frag[2]); 
+      half2 Q4 = *reinterpret_cast<half2*>(&Q_frag[3]);
+      printf("~~~~ wid: %d, laneid: %d, D_frag[4]: %f, D_frag[5]: %f, D_frag[6]: %f, D_frag[7]: %f, \n", wid, laneid, D_frag[4], D_frag[5], D_frag[6], D_frag[7]);
+      printf("~~~~ wid: %d, laneid: %d, B_frag[0].x: %f, B_frag[0].y: %f, B_frag[1].x: %f, B_frag[1].y: %f\n", wid, laneid, __half2float(B1.x), __half2float(B1.y), __half2float(B2.x), __half2float(B2.y));
+      printf("~~~~ wid: %d, laneid: %d, Q_frag[0].x: %f, Q_frag[0].y: %f, Q_frag[1].x: %f, Q_frag[1].y: %f\n", wid, laneid, __half2float(Q1.x), __half2float(Q1.y), __half2float(Q2.x), __half2float(Q2.y));
+      printf("~~~~ wid: %d, laneid: %d, Q_frag[2].x: %f, Q_frag[2].y: %f, Q_frag[3].x: %f, Q_frag[3].y: %f\n", wid, laneid, __half2float(Q3.x), __half2float(Q3.y), __half2float(Q4.x), __half2float(Q4.y));
+    }
+    for(int i =0; i< 2; i++){// 2 16x8 blocks
+      int sum_offset = i*BLK_M*BLK_N;
+      for(int j=0; j< 2; j++){// 2 8x8 blocks in each 16x8 block
+        atomicAdd(&sum[sum_offset + j*BLK_N*BLK_N + laneid*2], D_frag[i*4 + j*2]);
+        atomicAdd(&sum[sum_offset + j*BLK_N*BLK_N + laneid*2 + 1], D_frag[i*4 + j*2 + 1]);
+      }
+    }
+    __syncthreads();
+    if(sddmm_result != nullptr){
+      // have warp 0 load sum into sddmm_result, which is row major
+      if(wid == 0){
+        //print entire sum
+        if(tcb_id == 0 && bid == 0 && tid == 0){
+          for(int i = 0; i < 2; i++){
+            for(int j = 0; j < 2; j++){
+              for(int k = 0; k < BLK_N; k++){
+                for(int l = 0; l < BLK_N; l++){
+                  printf("%f ", sum[i*BLK_M*BLK_N + j*BLK_N*BLK_N + k*BLK_N + l]);
+                }
+                printf("\n");
+              }
+              printf("------\n");
+            }
+            printf("==========\n");
+          }
+          printf("==========\n");
+          printf("==========\n");
+        }
+        int offset = tcb_id * BLK_M * BLK_N;
+        for(int i = 0; i < 2; i++){ // 2 16x8 blocks
+          for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
+            int sum_offset = i*BLK_M*BLK_N + j*BLK_N*BLK_N + laneid*2;
+            sddmm_result[offset + sum_offset] = sum[sum_offset];
+            sddmm_result[offset + sum_offset + 1] = sum[sum_offset + 1];
+          }
+        }
+      }
+    }
+    for(int i = 0; i < 2; i++){
+      float4 val = reinterpret_cast<float4*>(sum)[laneid * 8 + i * 4];
+      half h0 = __float2half(val.x);
+      half h1 = __float2half(val.y);
+      half h2 = __float2half(val.z);
+      half h3 = __float2half(val.w);
+      temp.h2 = __halves2half2(h0, h1);
+      S_frag[i*2] = temp.u32;
+      temp.h2 = __halves2half2(h2, h3);
+      S_frag[i*2+1] = temp.u32;
+    }
+    __syncthreads();
+    //reset sum to 0
+    for(int i = tid; i < BLK_M * BLK_N * 2; i += blockDim.x * blockDim.y){
+      sum[i] = 0.0f;
+    }
+    // debug
+    if(bid == 0 && threadIdx.x == 0 && threadIdx.y == 0){
+      printf("sddmm_result[0]: %f, sddmm_result[1]: %f, sddmm_result[2]: %f, sddmm_result[3]: %f\n", sddmm_result[0], sddmm_result[1], sddmm_result[2], sddmm_result[3]);
+    }
+    /////////
+    // SpMM
+    /////////
+    // load feature matrix block
+    for(int i = 0; i < 2; i++){
+      int rowIdx = (wid * BLK_M)/2 + (laneid % 4) + i*4;
+			temp.h2 = V_half2[sparse_AToX_idx[tcb_id * BLK_N + laneid / 4] * embedding_dim/2 + rowIdx]; // /2 because half2
+      __syncwarp();
+      shfl_transpose_warp(temp.h2, laneid);
+      temp.u32 = S_frag[i*2];
+      B_frag[i] = temp.u32;
+		}
+    HMMA16816(O_frag[0], O_frag[1], O_frag[2], O_frag[3], 
+              S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
+              B_frag[0], B_frag[1], 
+              C_frag[0], C_frag[1], C_frag[2], C_frag[3]);
+    for(int i = 0; i < 2; i++){
+      int rowIdx = (bid * BLK_M)/2 + (laneid % 4) * 2 + i;
+			temp.h2 = V_half2[dense_inds[2+i] * embedding_dim/2 + rowIdx]; // /2 because half2
+			__syncwarp();
+      shfl_transpose_warp(temp.h2, laneid);
+      temp.u32 = S_frag[i*2];
+      B_frag[i] = temp.u32;
+		}
+    HMMA16816(O_frag[4], O_frag[5], O_frag[6], O_frag[7], 
+              S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
+              B_frag[0], B_frag[1], 
+              C_frag[0], C_frag[1], C_frag[2], C_frag[3]);
+  }
+  for(int j=0; j < 2; j++){// 2 8x8 blocks in each 16x8 block
+    int rowIdx = bid * BLK_M + (laneid / 4) + j * BLK_M/2;
+    for(int i =0; i < 2; i++){// 2 16x8 blocks
+      int colIdx = wid * BLK_N + i * BLK_N;
+      output[rowIdx * embedding_dim + colIdx] = O_frag[i*4 + j*2];
+      output[rowIdx * embedding_dim + colIdx + 1] = O_frag[i*4 + j*2 + 1]; 
+    }
+  }
+}
+#endif

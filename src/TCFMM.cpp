@@ -42,8 +42,6 @@ preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
   // input tensors.
   auto options_gpu =
       torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-  auto options_gpu_unit8 =
-      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
   auto edgeList = edgeList_tensor.data_ptr<int>();
   auto blockPartition = blockPartition_tensor.data_ptr<int>();
   auto row_window_offset_tensor =
@@ -93,6 +91,16 @@ fusedMM_forward_cuda(
   bool use_m8n32k16
 );
 
+std::vector<torch::Tensor> 
+f3S_forward_cuda(
+  torch::Tensor TCblock_rowid,
+  torch::Tensor sparse_AToX_idx, 
+  int num_nodes, 
+  int embedding_dim,
+  torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
+  bool save_sddmm_result
+);
+
 std::vector<torch::Tensor>
 fusedMM_forward(torch::Tensor input, torch::Tensor TCblock_rowid,
                 torch::Tensor TCblocktile_id,
@@ -132,7 +140,41 @@ fusedMM_forward(torch::Tensor input, torch::Tensor TCblock_rowid,
   return result;
 }
 
+std::vector<torch::Tensor>
+f3S_forward(torch::Tensor TCblock_rowid,
+            torch::Tensor sparse_AToX_idx, 
+            int num_nodes, 
+            torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
+            bool save_sddmm_result) {
+  CHECK_INPUT(Q);
+  CHECK_INPUT(K);
+  CHECK_INPUT(V);
+  CHECK_INPUT(TCblock_rowid);
+  CHECK_INPUT(sparse_AToX_idx);
+  cudaEvent_t start, stop;
+  float elapsedTime;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+
+  int embedding_dim = Q.size(1);
+  cudaEventRecord(start, 0);
+  auto result = f3S_forward_cuda(TCblock_rowid, 
+                                 sparse_AToX_idx, 
+                                 num_nodes, 
+                                 embedding_dim, 
+                                 Q, K, V, 
+                                 save_sddmm_result);
+  cudaEventRecord(stop, 0);
+  cudaEventSynchronize(stop);
+  cudaEventElapsedTime(&elapsedTime, start, stop);
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+  printf("f3S forward execution time (cuda events): %f ms\n", elapsedTime);
+  return result;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("preprocess_gpu", &preprocess_gpu, "Preprocess Step on (CUDA)");
   m.def("fusedMM_forward", &fusedMM_forward, "FusedMM forward (CUDA)");
+  m.def("f3S_forward", &f3S_forward, "fused Spmm-Softmax-Spmm (CUDA)");
 }

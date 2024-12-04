@@ -21,8 +21,8 @@ def convert_row_major_nz_to_block_row_major(A, BLK_H, BLK_W):
 def main():
   n_runs = 1
   n_test = 1
-  BLK_H = 8
-  BLK_W = 32
+  BLK_H = 16
+  BLK_W = 8
   n_heads = 1
   feature_size = 64
  
@@ -104,7 +104,7 @@ def main():
     # final_err_ftc_fp16_v_true_fp32.append(rel_err.item())
 
     use_f32_edge_attention = True
-    use_m8n32k16 = True
+    use_m8n32k16 = False
     start_time = time.time()
     for i in range(n_runs):
       fusedR, edge_attention = TCFMM.fusedMM_forward(X_half, RowWindowOffset, TCblocktileId, TCblockoffset, SparseAToXindex, size, save_edge_attention, use_f32_edge_attention, use_m8n32k16)
@@ -112,8 +112,8 @@ def main():
     FTC_f32_inter_time = (time.time() - start_time)/n_runs
     print(f"FTC_f32_inter_time: {FTC_f32_inter_time}")
     rel_err = torch.norm(edge_attention - edge_attention_true) / edge_attention_true_norm
-    print(edge_attention[100:120])
-    print(edge_attention_true[100:120])
+    print(edge_attention[0:20])
+    print(edge_attention_true[0:20])
     edge_atten_err_ftc_fp32_v_true_fp32.append(rel_err.item())
     rel_err = torch.norm(fusedR - true) / true_norm
     final_err_ftc_fp32_v_true_fp32.append(rel_err.item())

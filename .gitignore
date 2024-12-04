@@ -5,8 +5,10 @@
 *.ncu-rep
 *DS_Store
 scripts/tests/__pycache__/
+scripts/graph_stat/__pycache__/
 scripts/pushToHpc3.sh
 scripts/pullFromHpc3.sh
 src/build
 src/dist
 src/TCFMM.egg-info
+test/
