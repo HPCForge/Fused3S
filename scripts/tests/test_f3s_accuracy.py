@@ -146,16 +146,12 @@ def main():
     edgeToColumn_cuda = edgeToColumn.cuda()
     edgeToRow_cuda  = edgeToRow.cuda()
     RowWindowOffset, TCblockRowid,\
-        TCblocktileId, TCblockoffset, SparseAToXindex,\
-            block_count = TCFMM.preprocess_gpu(torch.IntTensor(A_csr_h.indices).cuda(), torch.IntTensor(A_csr_h.indptr).cuda(), size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
-    print(RowWindowOffset.shape)
-    print(RowWindowOffset)
-    print(SparseAToXindex.shape)
-    print(SparseAToXindex)
+    TCblocktileId, TCblockoffset, SparseAToXindex,\
+    TCblockBitMap, block_count = TCFMM.preprocess_gpu(torch.IntTensor(A_csr_h.indices).cuda(), torch.IntTensor(A_csr_h.indptr).cuda(), size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
 
     start_time = time.time()
     for i in range(n_runs):
-      fusedR, sddmm_result = TCFMM.f3S_forward(RowWindowOffset, SparseAToXindex, size, Q_half, K_half, V_half, save_edge_attention)
+      fusedR, sddmm_result = TCFMM.f3S_forward(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, save_edge_attention)
       print(fusedR.shape)
     f3s_time = (time.time() - start_time)/n_runs
     print(f"f3s_time: {f3s_time}")

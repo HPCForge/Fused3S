@@ -26,14 +26,14 @@ void fill_window_cuda(int *edgeToColumn, int *blockPartition, int *nodePointer,
 void fill_segment_cuda(int *nodePointer, int *seg_out, int blockSize_h,
                        int blockSize_w, int num_nodes);
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int>
 seg_sort_dequ(int *seg, int *edgeLists, int *nodepointer, int *edgetocol,
               int *edgetorow, int *blockPartition, int *blocknum,
               int *row_window_offset, int blockSize_h, int blockSize_w,
               int num_nodes, int num_edges, int rowwindow_num);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-           torch::Tensor, int>
+           torch::Tensor, torch::Tensor, int>
 preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
                int num_nodes, int blockSize_h, int blockSize_w,
                torch::Tensor blockPartition_tensor,
@@ -70,12 +70,14 @@ preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
   auto tcblock_rowid_tensor = std::get<1>(tuple_tensor_blockcnt);
   auto tcblocktile_id_tensor = std::get<2>(tuple_tensor_blockcnt);
   auto sparse_AToX_index_tensor = std::get<3>(tuple_tensor_blockcnt);
-  block_counter = std::get<4>(tuple_tensor_blockcnt);
+  auto tcblock_bit_map_tensor = std::get<4>(tuple_tensor_blockcnt);
+  block_counter = std::get<5>(tuple_tensor_blockcnt);
   printf("TC_Blocks:\t%d\nExp_Edges:\t%d\n", block_counter,
          block_counter * 8 * 16);
   return std::make_tuple(row_window_offset_tensor, tcblock_rowid_tensor,
                          tcblocktile_id_tensor, tcblock_offset_tensor,
-                         sparse_AToX_index_tensor, block_counter);
+                         sparse_AToX_index_tensor, tcblock_bit_map_tensor, 
+                         block_counter);
 }
 
 
@@ -95,6 +97,7 @@ std::vector<torch::Tensor>
 f3S_forward_cuda(
   torch::Tensor TCblock_rowid,
   torch::Tensor sparse_AToX_idx, 
+  torch::Tensor TCblock_bit_map,
   int num_nodes, 
   int embedding_dim,
   torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
@@ -143,6 +146,7 @@ fusedMM_forward(torch::Tensor input, torch::Tensor TCblock_rowid,
 std::vector<torch::Tensor>
 f3S_forward(torch::Tensor TCblock_rowid,
             torch::Tensor sparse_AToX_idx, 
+            torch::Tensor TCblock_bit_map,
             int num_nodes, 
             torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
             bool save_sddmm_result) {
@@ -151,6 +155,7 @@ f3S_forward(torch::Tensor TCblock_rowid,
   CHECK_INPUT(V);
   CHECK_INPUT(TCblock_rowid);
   CHECK_INPUT(sparse_AToX_idx);
+  CHECK_INPUT(TCblock_bit_map);
   cudaEvent_t start, stop;
   float elapsedTime;
   cudaEventCreate(&start);
@@ -160,6 +165,7 @@ f3S_forward(torch::Tensor TCblock_rowid,
   cudaEventRecord(start, 0);
   auto result = f3S_forward_cuda(TCblock_rowid, 
                                  sparse_AToX_idx, 
+                                 TCblock_bit_map,
                                  num_nodes, 
                                  embedding_dim, 
                                  Q, K, V, 
