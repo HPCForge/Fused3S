@@ -75,10 +75,10 @@ def main():
   BLK_H = 16
   BLK_W = 8
   n_heads = 1
-  feature_size = 32
+  feature_size = 64
  
-  size = 128
-  density = 0.5
+  size = 100
+  density = 0.2
 
   half_v_float_edge_atten = []
   half_v_float_final = []
@@ -120,7 +120,6 @@ def main():
     V_half = V.to(torch.float16)
     K_half_cpu = K_half.to("cpu")
     torch.set_printoptions(precision=3)
-    print(K_half_cpu[:10,:10])
     
     sddmm_half = (Q_half @ K_half.T) * A_dense_half * attention_w.half()
     sddmm = (Q @ K.T) * A_dense * attention_w
@@ -152,12 +151,12 @@ def main():
     start_time = time.time()
     for i in range(n_runs):
       fusedR, sddmm_result = TCFMM.f3S_forward(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, save_edge_attention)
-      print(fusedR.shape)
     f3s_time = (time.time() - start_time)/n_runs
     print(f"f3s_time: {f3s_time}")
     rel_err = torch.norm(sddmm_result - sddmm_true) / sddmm_true_norm
-    print(sddmm_result[0:20])
-    print(sddmm_true[0:20])
+    torch.set_printoptions(precision=1)
+    print(fusedR[0:16, 0:16])
+    print(true[0:16, 0:16])
     edge_atten_err_ftc_fp32_v_true_fp32.append(rel_err.item())
     rel_err = torch.norm(fusedR - true) / true_norm
     final_err_ftc_fp32_v_true_fp32.append(rel_err.item())
