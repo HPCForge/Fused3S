@@ -69,15 +69,30 @@ def process_matrix(mat, BLK_M, BLK_N):
 
     return R
 
+def pad_csr_matrix(mat, desired_rows, desired_cols):
+    current_rows, current_cols = mat.shape
+    
+    # Pad columns if needed
+    if current_cols < desired_cols:
+        padding_cols = sp.sparse.csr_matrix((current_rows, desired_cols - current_cols))
+        mat = sp.sparse.hstack([mat, padding_cols])
+    
+    # Pad rows if needed
+    if current_rows < desired_rows:
+        padding_rows = sp.sparse.csr_matrix((desired_rows - current_rows, desired_cols))
+        mat = sp.sparse.vstack([mat, padding_rows])
+    
+    return mat
+
 def main():
   n_runs = 1
   n_test = 1
   BLK_H = 16
   BLK_W = 8
   n_heads = 1
-  feature_size = 64
+  feature_size = 256
  
-  size = 100
+  size = 1000
   density = 0.2
 
   half_v_float_edge_atten = []
@@ -96,33 +111,41 @@ def main():
     print(f"----------{n}-----------")
  
     A_csr_h = sp.sparse.random(size, size, density=density, format='csr', data_rvs=np.random.rand)
-    A_csr_h = (A_csr_h + A_csr_h.T) / 2
+    # A_csr_h = (A_csr_h + A_csr_h.T) / 2
+    padded_size = ((size + BLK_H - 1) // BLK_H) * BLK_H
+    A_csr_h_padded = pad_csr_matrix(A_csr_h, padded_size, padded_size)
+
     # Round and convert all non-zero entries to 1
     A_csr_h.data = np.ceil(A_csr_h.data, dtype=np.float32)
     A_dense = torch.tensor(A_csr_h.todense()).cuda()
     A_dense_half = A_dense.to(torch.float16)
 
-    # attention weights
-    # attention_w = torch.randn(1, n_heads, device='cuda')
-    attention_w = torch.ones(1, n_heads, device='cuda')
     # generate the dense feature matrix
     Q = torch.rand(size, feature_size, dtype=torch.float32, device='cuda')
     K = torch.rand(size, feature_size, dtype=torch.float32, device='cuda')
     V = torch.rand(size, feature_size, dtype=torch.float32, device='cuda')
     # pad the feature matrix to have a multiple of 16 columns
-    if feature_size % 16 != 0:
-      padding_len = 16 - feature_size % 16
-      Q = F.pad(Q, (0, padding_len, 0, 0))
-      K = F.pad(K, (0, padding_len, 0, 0))
-      V = F.pad(V, (0, padding_len, 0, 0))
+    # if feature_size % BLK_H != 0:
+    col_padding_len = 0 if feature_size % BLK_H == 0 else BLK_H - feature_size % BLK_H
+    # row_padding_len = 0 if size % BLK_H == 0 else BLK_H - size % BLK_H
+    row_padding_len = 0
+    Q = F.pad(Q, (0, col_padding_len, 0, row_padding_len), "constant", 0)
+    K = F.pad(K, (0, col_padding_len, 0, row_padding_len), "constant", 0)
+    V = F.pad(V, (0, col_padding_len, 0, row_padding_len), "constant", 0)
     Q_half = Q.to(torch.float16)
+    print(f"Q_half.shape: {Q_half.shape}")
+    print(Q_half[16:, :])
     K_half = K.to(torch.float16)
+    print(f"K_half.shape: {K_half.shape}")
     V_half = V.to(torch.float16)
+    print(f"V_half.shape: {V_half.shape}")
     K_half_cpu = K_half.to("cpu")
     torch.set_printoptions(precision=3)
     
-    sddmm_half = (Q_half @ K_half.T) * A_dense_half * attention_w.half()
-    sddmm = (Q @ K.T) * A_dense * attention_w
+    temp = Q_half @ K_half.T
+    # raise Exception("stop here")
+    sddmm_half = (Q_half @ K_half.T) * A_dense_half
+    sddmm = (Q @ K.T) * A_dense
     # sddmm_true_half = convert_row_major_nz_to_block_row_major(sddmm_half, BLK_H, BLK_W) 
     # sddmm_true = convert_row_major_nz_to_block_row_major(sddmm, BLK_H, BLK_W)
     sddmm_true_half = process_matrix(sddmm_half, BLK_H, BLK_W)
@@ -146,7 +169,7 @@ def main():
     edgeToRow_cuda  = edgeToRow.cuda()
     RowWindowOffset, TCblockRowid,\
     TCblocktileId, TCblockoffset, SparseAToXindex,\
-    TCblockBitMap, block_count = TCFMM.preprocess_gpu(torch.IntTensor(A_csr_h.indices).cuda(), torch.IntTensor(A_csr_h.indptr).cuda(), size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
+    TCblockBitMap, block_count = TCFMM.preprocess_gpu(torch.IntTensor(A_csr_h_padded.indices).cuda(), torch.IntTensor(A_csr_h_padded.indptr).cuda(), size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
 
     start_time = time.time()
     for i in range(n_runs):
@@ -154,9 +177,7 @@ def main():
     f3s_time = (time.time() - start_time)/n_runs
     print(f"f3s_time: {f3s_time}")
     rel_err = torch.norm(sddmm_result - sddmm_true) / sddmm_true_norm
-    torch.set_printoptions(precision=1)
-    print(fusedR[0:16, 0:16])
-    print(true[0:16, 0:16])
+
     edge_atten_err_ftc_fp32_v_true_fp32.append(rel_err.item())
     rel_err = torch.norm(fusedR - true) / true_norm
     final_err_ftc_fp32_v_true_fp32.append(rel_err.item())
