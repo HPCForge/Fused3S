@@ -1,0 +1,3 @@
+[submodule "baselines/DF-GNN"]
+	path = baselines/DF-GNN
+	url = git@github.com:zli96/DF-GNN.git
