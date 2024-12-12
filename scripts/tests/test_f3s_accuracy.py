@@ -84,23 +84,38 @@ def pad_csr_matrix(mat, desired_rows, desired_cols):
     
     return mat
 
+# compute the softmax of the matrix, 
+# but only for elements whose corresponding value in A is not 0
+def row_wise_softmax_mask(matrix, A):
+    mask = (A != 0)
+    neg_inf = torch.tensor(float('-inf'), device=matrix.device, dtype=matrix.dtype)
+    one_val = torch.tensor(1.0, device=matrix.device, dtype=matrix.dtype)
+    
+    masked_matrix = torch.where(mask, matrix, neg_inf)
+    row_max, _ = torch.max(masked_matrix, dim=1, keepdim=True)
+    shifted_matrix = torch.where(mask, matrix - row_max, neg_inf)
+    exp_matrix = torch.exp(shifted_matrix) * mask.to(matrix.dtype)
+    row_sum = exp_matrix.sum(dim=1, keepdim=True)
+    # Prevent division by zero if a row is entirely masked
+    row_sum = torch.where(row_sum == 0, one_val, row_sum)
+    softmax_matrix = exp_matrix / row_sum
+    return softmax_matrix
+
 def main():
   n_runs = 1
   n_test = 1
   BLK_H = 16
   BLK_W = 8
   n_heads = 1
-  feature_size = 256
- 
+  feature_size = 100
   size = 1000
   density = 0.2
-
-  half_v_float_edge_atten = []
+  apply_softmax = True
+  half_v_float_sddmm = []
+  half_v_float_softmax = []
   half_v_float_final = []
-  edge_atten_err_ftc_fp16_v_true_fp32 = []
-  edge_atten_err_ftc_fp32_v_true_fp32 = []
-  final_err_ftc_fp16_v_true_fp32 = []
-  final_err_ftc_fp32_v_true_fp32 = []
+  f3s_v_true_fp32_sddmm = []
+  f3s_v_true_fp32_final = []
   fusedRs = []
   # np.random.seed(26)
   # torch.manual_seed(26)
@@ -134,7 +149,6 @@ def main():
     V = F.pad(V, (0, col_padding_len, 0, row_padding_len), "constant", 0)
     Q_half = Q.to(torch.float16)
     print(f"Q_half.shape: {Q_half.shape}")
-    print(Q_half[16:, :])
     K_half = K.to(torch.float16)
     print(f"K_half.shape: {K_half.shape}")
     V_half = V.to(torch.float16)
@@ -142,24 +156,30 @@ def main():
     K_half_cpu = K_half.to("cpu")
     torch.set_printoptions(precision=3)
     
-    temp = Q_half @ K_half.T
-    # raise Exception("stop here")
-    sddmm_half = (Q_half @ K_half.T) * A_dense_half
-    sddmm = (Q @ K.T) * A_dense
-    # sddmm_true_half = convert_row_major_nz_to_block_row_major(sddmm_half, BLK_H, BLK_W) 
-    # sddmm_true = convert_row_major_nz_to_block_row_major(sddmm, BLK_H, BLK_W)
-    sddmm_true_half = process_matrix(sddmm_half, BLK_H, BLK_W)
-    sddmm_true = process_matrix(sddmm, BLK_H, BLK_W)
+    sddmm_half_og_form = (Q_half @ K_half.T) * A_dense_half
+    sddmm_og_form = (Q @ K.T) * A_dense
+    sddmm_true_half = process_matrix(sddmm_half_og_form, BLK_H, BLK_W)
+    sddmm_true = process_matrix(sddmm_og_form, BLK_H, BLK_W)
     sddmm_true_norm = torch.norm(sddmm_true)
     rel_err = torch.norm(sddmm_true - sddmm_true_half)/sddmm_true_norm
-    half_v_float_edge_atten.append(rel_err.item())
-    true = sddmm @ V
-    true_half = sddmm_half @ V_half
+    half_v_float_sddmm.append(rel_err.item())
+    if apply_softmax:
+      softmax_true_half_og_form = row_wise_softmax_mask(sddmm_half_og_form, A_dense_half)
+      softmax_true_og_form = row_wise_softmax_mask(sddmm_og_form, A_dense)
+      softmax_true_half = process_matrix(softmax_true_half_og_form, BLK_H, BLK_W)
+      softmax_true = process_matrix(softmax_true_og_form, BLK_H, BLK_W)
+      softmax_true_norm = torch.norm(softmax_true)
+      rel_err = torch.norm(softmax_true - softmax_true_half)/softmax_true_norm
+      half_v_float_softmax.append(rel_err.item())
+    S = softmax_true_og_form if apply_softmax else sddmm_og_form
+    S_half = softmax_true_half_og_form if apply_softmax else sddmm_half_og_form
+    true = S @ V
+    true_half = S_half @ V_half
     true_norm = torch.norm(true)
     rel_err = torch.norm(true - true_half)/true_norm
     half_v_float_final.append(rel_err.item())
 
-    save_edge_attention = True
+    save_sddmm_result = True
     num_row_windows = (size + BLK_H - 1) // BLK_H
     edgeToColumn = torch.zeros(A_csr_h.nnz, dtype=torch.int)
     edgeToRow = torch.zeros(A_csr_h.nnz, dtype=torch.int)
@@ -173,27 +193,24 @@ def main():
 
     start_time = time.time()
     for i in range(n_runs):
-      fusedR, sddmm_result = TCFMM.f3S_forward(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, save_edge_attention)
+      fusedR, sddmm_result = TCFMM.f3S_forward(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, apply_softmax, save_sddmm_result)
     f3s_time = (time.time() - start_time)/n_runs
     print(f"f3s_time: {f3s_time}")
     rel_err = torch.norm(sddmm_result - sddmm_true) / sddmm_true_norm
-
-    edge_atten_err_ftc_fp32_v_true_fp32.append(rel_err.item())
+    f3s_v_true_fp32_sddmm.append(rel_err.item())
+    torch.set_printoptions(precision=2)
     rel_err = torch.norm(fusedR - true) / true_norm
-    final_err_ftc_fp32_v_true_fp32.append(rel_err.item())
-    
+    f3s_v_true_fp32_final.append(rel_err.item())
 
-  half_v_float_edge_atten_mean = np.mean(np.array(half_v_float_edge_atten))
+  half_v_float_sddmm_mean = np.mean(np.array(half_v_float_sddmm))
   half_v_float_final_mean = np.mean(np.array(half_v_float_final))
-  # mean_edge_atten_err_ftc_fp16_v_true_fp32 = np.mean(np.array(edge_atten_err_ftc_fp16_v_true_fp32))
-  # mean_final_err_ftc_fp16_v_true_fp32 = np.mean(np.array(final_err_ftc_fp16_v_true_fp32))
-  mean_edge_atten_err_ftc_fp32_v_true_fp32 = np.mean(np.array(edge_atten_err_ftc_fp32_v_true_fp32))
-  mean_final_err_ftc_fp32_v_true_fp32 = np.mean(np.array(final_err_ftc_fp32_v_true_fp32))
+  f3s_v_true_fp32_sddmm = np.mean(np.array(f3s_v_true_fp32_sddmm))
+  f3s_v_true_fp32_final = np.mean(np.array(f3s_v_true_fp32_final))
 
-  print(f"sddmm pytorch half vs single: {half_v_float_edge_atten_mean}")
+  print(f"sddmm pytorch half vs single: {half_v_float_sddmm_mean}")
   print(f"final solution pytorch half vs float: {half_v_float_final_mean}")
-  print(f"f3s sddmm vs pytorch float: {mean_edge_atten_err_ftc_fp32_v_true_fp32}")
-  print(f"f3s final solution vs pytorch float: {mean_final_err_ftc_fp32_v_true_fp32}")
+  print(f"f3s sddmm vs pytorch float: {f3s_v_true_fp32_sddmm}")
+  print(f"f3s final solution vs pytorch float: {f3s_v_true_fp32_final}")
 
 if __name__ == "__main__":
   main()

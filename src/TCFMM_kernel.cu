@@ -51,6 +51,46 @@ __device__ void update_bitmap(uint64_t* bitmap,
   atomicOr(&ull_bitmap[tcblock_id * n_sub_blocks_per_tcblock + sub_block_id], mask);
 }
 
+__device__ void save_sddmm_result(float* sum, float* sddmm_result, int tcb_id, int last_block){
+  int wid = threadIdx.y;    // warp_index handling multi-dimension > 16.
+  int laneid = threadIdx.x; // lanid of each warp.
+  // have warp 0 load sum into sddmm_result, which is block row major
+  if(wid == 0){
+    int offset = tcb_id * BLK_M * BLK_N;
+    for(int i = 0; i < 2; i++){ // 2 16x8 blocks
+      if(!last_block || i == 0){
+        for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
+          int sum_offset = i*BLK_M*BLK_N + j*BLK_N*BLK_N + laneid*2;
+          sddmm_result[offset + sum_offset] = sum[sum_offset];
+          sddmm_result[offset + sum_offset + 1] = sum[sum_offset + 1];
+        }
+      }
+    }
+  }
+}
+
+// produce the max value for every subwarp of 4 threads
+__device__ void reduce_max(float& max, int lane_id){
+  int group_id = lane_id / 4;
+  // Mask for subwarp of 4 threads
+  unsigned int group_mask = 0xF << (group_id * 4);
+
+  // Perform comparisons in two rounds
+  float neighbor = __shfl_xor_sync(group_mask, max, 1, 4);
+  max = fmaxf(max, neighbor);
+  neighbor = __shfl_xor_sync(group_mask, max, 2, 4);
+  max = fmaxf(max, neighbor);
+}
+
+// sum up "sum" for every 4 consecutive threads in a warp
+// results is only valid for the first thread in the warp
+__device__ void reduce_sum(float& sum){
+  for (int offset = 1; offset < 4; offset *= 2) {
+    float neighbor = __shfl_down_sync(0xFFFFFFFF, sum, offset, 4);
+    sum += neighbor;
+  }
+}
+
 __device__ void print(float* sum, int bid, int wid, int laneid){
   if(bid == 1 && wid == 0 && laneid == 0){
     printf("sum: \n");
@@ -467,7 +507,8 @@ __global__ void f3s_m16n8k16_cuda_kernel(
     torch::Half *__restrict__ K, 
     torch::Half *__restrict__ V,
 		float *output,              // output feature matrix.
-		float *edgeAttention // result of SDDMM
+		float *sddmm_result, // result of SDDMM
+    bool apply_softmax
 );
 
 std::vector<torch::Tensor> f3S_forward_cuda(
@@ -477,6 +518,7 @@ std::vector<torch::Tensor> f3S_forward_cuda(
     int num_nodes, 
     int embedding_dim,
     torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
+    bool apply_softmax,
     bool save_sddmm_result){
   int nBlockEmbeddingDim = (embedding_dim + BLK_N - 1) / BLK_N;
   int nWarpPerBlock = (nBlockEmbeddingDim + TCBLOCK_PER_WARP - 1) / TCBLOCK_PER_WARP;
@@ -486,10 +528,11 @@ std::vector<torch::Tensor> f3S_forward_cuda(
   dim3 grid(nRowWindow, 1, 1);
   dim3 block(WARP_SIZE, nWarpPerBlock, 1);
   int nTCBlock = sparse_AToX_idx.size(0)/BLK_N;
-	torch::Tensor sddmm_result = torch::zeros({nTCBlock*BLK_M*BLK_N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));;
+	torch::Tensor sddmm_result = torch::zeros({nTCBlock*BLK_M*BLK_N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
   float* sddmm_result_ptr = save_sddmm_result ? sddmm_result.data_ptr<float>() : nullptr;
+  int dynamic_shared_size = apply_softmax ? 2 * BLK_M * sizeof(float) : 0;
   #if BLK_M == 16 && BLK_N == 8 && BLK_K == 16
-  f3s_m16n8k16_cuda_kernel<<<grid, block>>>(
+  f3s_m16n8k16_cuda_kernel<<<grid, block, dynamic_shared_size>>>(
     TCblock_rowid.data_ptr<int>(), 
     sparse_AToX_idx.data_ptr<int>(),
     TCblock_bit_map.data_ptr<uint64_t>(),
@@ -498,7 +541,8 @@ std::vector<torch::Tensor> f3S_forward_cuda(
     K.data_ptr<torch::Half>(), 
     V.data_ptr<torch::Half>(),
     output.data_ptr<float>(),
-    sddmm_result_ptr);
+    sddmm_result_ptr,
+    apply_softmax);
   #else
   printf("only m16n8k16 is supported\n");
   #endif
@@ -1094,8 +1138,8 @@ __global__ void f3s_m16n8k16_cuda_kernel(
     torch::Half *__restrict__ K, 
     torch::Half *__restrict__ V,
 		float *output,
-		float *sddmm_result
-    ){
+		float *sddmm_result,
+    bool apply_softmax){
   // 2 16x8 blocks, each block is divided into 2 8x8 subblocks in row major order.
   __shared__ float sum[BLK_M * BLK_N * 2];
   float2* sum_float2 = reinterpret_cast<float2*>(sum);
@@ -1113,10 +1157,21 @@ __global__ void f3s_m16n8k16_cuda_kernel(
   // ending node_id of the current row_window.
   int nid_end = min((bid + 1) * BLK_H, numNodes); 
   assert(nid_start < nid_end);
+
+  // m, r (size BLK_M each) for online-softmax, in this order.
+  extern __shared__ float row_max_row_sum []; 
+  float* row_max = row_max_row_sum;
+  float* row_sum = row_max_row_sum + BLK_M;
+  if(tid < BLK_M){
+    row_max[tid] = 0.0f;
+    row_sum[tid] = 0.0f;
+  }
  
   uint32_t Q_frag[4] = {0};
   uint32_t B_frag[2];
-  float D_frag[8];// sddmm intermediate
+  // sddmm intermediate, 
+  // TODO: this can probably be disallocated during spmm phase
+  float D_frag[8];
   uint32_t S_frag[4];// sddmm result
   float O_frag[8] = {0};// spmm result
   float C_frag[4] = {0};
@@ -1195,34 +1250,86 @@ __global__ void f3s_m16n8k16_cuda_kernel(
     __syncthreads();
 
     if(sddmm_result != nullptr){
-      // have warp 0 load sum into sddmm_result, which is block row major
-      if(wid == 0){
-        int offset = tcb_id * BLK_M * BLK_N;
-        for(int i = 0; i < 2; i++){ // 2 16x8 blocks
+      save_sddmm_result(sum, sddmm_result, tcb_id, last_block);
+    }
+
+    if(apply_softmax){
+      float max [2] = {0};
+      float exp_max_diff [2];
+      for(int j = 0; j < 2; j++){// 2 8x8 blocks in each 16x8 block
+        int sum_offset = j*BLK_N*BLK_N/2;
+        for(int i = 0; i < 2; i++){// 2 16x8 blocks
           if(!last_block || i == 0){
-            for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
-              int sum_offset = i*BLK_M*BLK_N + j*BLK_N*BLK_N + laneid*2;
-              sddmm_result[offset + sum_offset] = sum[sum_offset];
-              sddmm_result[offset + sum_offset + 1] = sum[sum_offset + 1];
+            float2 temp = sum_float2[i*BLK_M*BLK_N/2 + sum_offset + laneid];
+            D_frag[i*4 + j*2] = temp.x;
+            D_frag[i*4 + j*2 + 1] = temp.y;
+          }
+          else{
+            D_frag[i*4 + j*2] = 0.0f;
+            D_frag[i*4 + j*2 + 1] = 0.0f;
+          }
+        }
+        //max of the 4 elements in the same row across 2 16x8 blocks
+        //need every warp to do this because they will need it for the next computation
+        float max_old = row_max[j*BLK_N + laneid/4];
+        max[j] = fmaxf(
+          fmaxf(fmaxf(D_frag[j*2], D_frag[j*2+1]), fmaxf(D_frag[j*2+4], D_frag[j*2+5])), 
+          max_old);
+        reduce_max(max[j], laneid);
+        exp_max_diff[j] = expf(max_old - max[j]);
+        if(wid == 0 && laneid % 4 == 0){
+          row_max[j*BLK_N + laneid/4] = max[j];
+        }
+      }
+      // computes E_b and 
+      for(int i = 0; i < 2; i++){
+        for(int j=0; j< 2; j++){
+          for(int k = 0; k < 2; k++){
+            if(D_frag[i*2 + j*4 + k] != 0.0f){
+              D_frag[i*2 + j*4 + k] = expf(D_frag[i*2 + j*4 + k] - max[i]);
             }
           }
         }
       }
-    }
-    
-    for(int i = 0; i < 2; i++){// 2 16x8 blocks
-      int sum_offset = i*BLK_M*BLK_N/2;
-      if(!last_block || i == 0){
-        for(int j = 0; j < 2; j++){// 2 8x8 blocks in each 16x8 block
-          float2 temp = sum_float2[sum_offset + j*BLK_N*BLK_N/2 + laneid];
-          h2U32Converter.h2.x = __float2half(temp.x);
-          h2U32Converter.h2.y = __float2half(temp.y);
-          S_frag[i*2+j] = h2U32Converter.u32;
+      //update row_sum
+      if(wid == 0){
+        for(int i = 0; i < 2; i++){ // 2 8x8 blocks in each 16x8 block
+          float sum = D_frag[i*2] + D_frag[i*2+1] + D_frag[i*2+4] + D_frag[i*2+5];
+          reduce_sum(sum);
+          if(laneid % 4 == 0){
+            row_sum[i*BLK_N + laneid/4] = row_sum[i*BLK_N + laneid/4] * exp_max_diff[i] + sum;
+          }
         }
       }
-      else{
-        S_frag[i*2] = 0;
-        S_frag[i*2+1] = 0;
+      for(int i = 0; i < 2; i++){
+        for(int j = 0; j < 2; j++){
+          for(int k = 0; k < 2; k++){
+            O_frag[i*2 + j*4 + k] = O_frag[i*2 + j*4 + k] * (exp_max_diff[i]);
+          }
+        }
+      }
+      // convert E_b to fp16, done by every warp
+      for(int i = 0; i < 4; i++){
+        h2U32Converter.h2.x = __float2half(D_frag[i*2]);
+        h2U32Converter.h2.y = __float2half(D_frag[i*2+1]);
+        S_frag[i] = h2U32Converter.u32;
+      }
+    }
+    else{
+      for(int i = 0; i < 2; i++){// 2 16x8 blocks
+        int sum_offset = i*BLK_M*BLK_N/2;
+        if(!last_block || i == 0){
+          for(int j = 0; j < 2; j++){// 2 8x8 blocks in each 16x8 block
+            float2 temp = sum_float2[sum_offset + j*BLK_N*BLK_N/2 + laneid];
+            h2U32Converter.h2.x = __float2half(temp.x);
+            h2U32Converter.h2.y = __float2half(temp.y);
+            S_frag[i*2+j] = h2U32Converter.u32;
+          }
+        }
+        else{
+          S_frag[i*2] = 0;
+          S_frag[i*2+1] = 0;
+        }
       }
     }
     __syncthreads();
@@ -1253,6 +1360,18 @@ __global__ void f3s_m16n8k16_cuda_kernel(
                 S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
                 B_frag[0], B_frag[1], 
                 O_frag[4*j], O_frag[4*j+1], O_frag[4*j+2], O_frag[4*j+3]);
+    }
+  }
+  if(apply_softmax){
+    for(int i = 0; i < 2; i++){
+      int row_sum_offset = i*BLK_N + laneid/4;
+      for(int j = 0; j < 2; j++){
+        if(row_sum[row_sum_offset] != 0.0f){
+          int O_offset = i*2 + j*4;
+          O_frag[O_offset] = O_frag[O_offset] * (1.0f/row_sum[row_sum_offset]);
+          O_frag[O_offset + 1] = O_frag[O_offset + 1] * (1.0f/row_sum[row_sum_offset]);
+        }
+      }
     }
   }
   for(int j=0; j < 2; j++){// 2 8x8 blocks in each 16x8 block

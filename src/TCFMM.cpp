@@ -101,6 +101,7 @@ f3S_forward_cuda(
   int num_nodes, 
   int embedding_dim,
   torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
+  bool apply_softmax,
   bool save_sddmm_result
 );
 
@@ -149,6 +150,7 @@ f3S_forward(torch::Tensor TCblock_rowid,
             torch::Tensor TCblock_bit_map,
             int num_nodes, 
             torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
+            bool apply_softmax,
             bool save_sddmm_result) {
   CHECK_INPUT(Q);
   CHECK_INPUT(K);
@@ -169,6 +171,7 @@ f3S_forward(torch::Tensor TCblock_rowid,
                                  num_nodes, 
                                  embedding_dim, 
                                  Q, K, V, 
+                                 apply_softmax,
                                  save_sddmm_result);
   cudaEventRecord(stop, 0);
   cudaEventSynchronize(stop);
