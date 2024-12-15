@@ -187,9 +187,17 @@ def main():
     blockPartition_cuda  = blockPartition.cuda()
     edgeToColumn_cuda = edgeToColumn.cuda()
     edgeToRow_cuda  = edgeToRow.cuda()
+    indptr = torch.IntTensor(A_csr_h_padded.indices).cuda()
+    indices = torch.IntTensor(A_csr_h_padded.indptr).cuda()
+    print(indptr.shape)
+    print(indptr.device)
+    print(indptr.dtype)
+    print(indices.shape)
+    print(indices.device)
+    print(indices.dtype)
     RowWindowOffset, TCblockRowid,\
     TCblocktileId, TCblockoffset, SparseAToXindex,\
-    TCblockBitMap, block_count = TCFMM.preprocess_gpu(torch.IntTensor(A_csr_h_padded.indices).cuda(), torch.IntTensor(A_csr_h_padded.indptr).cuda(), size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
+    TCblockBitMap, block_count = TCFMM.preprocess_gpu(indptr, indices, size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
 
     start_time = time.time()
     for i in range(n_runs):

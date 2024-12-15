@@ -41,18 +41,9 @@ edgeToRow_cuda  = edgeToRow.cuda()
 RowWindowOffset, TCblockRowid,\
       TCblocktileId, TCblockoffset, SparseAToXindex,\
         block_count = DTCSpMM.preprocess_gpu(column_index_ori, row_pointers_ori, num_rows, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
-<<<<<<< Updated upstream
-use_f32_edge_attention = True
-=======
->>>>>>> Stashed changes
 # Run tests.
-# for feat_size in [128, 256, 512]:
 print("feat_size =", args.feat_size)
 X = torch.ones((num_rows, args.feat_size)).cuda()
 # Run test.
-<<<<<<< Updated upstream
-fusedR, edgeAttention = DTCSpMM.fusedMM_forward(X, RowWindowOffset, TCblocktileId, TCblockoffset, SparseAToXindex, num_rows, args.save_edge_attention, use_f32_edge_attention)
-=======
 use_f32_edge_attention = True
 fusedR, edgeAttention = DTCSpMM.fusedMM_forward(X.to(torch.float16), RowWindowOffset, TCblocktileId, TCblockoffset, SparseAToXindex, num_rows, args.save_edge_attention, use_f32_edge_attention)
->>>>>>> Stashed changes

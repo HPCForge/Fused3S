@@ -12,7 +12,8 @@ setup(
         include_dirs=[include_path],
         extra_compile_args={
             'nvcc': [
-              '-O2', 
+              '-maxrregcount=32',
+              '-O2',
               '-lineinfo',
               '-I' + include_path]
         }),
