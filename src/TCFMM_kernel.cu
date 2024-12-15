@@ -131,6 +131,26 @@ __device__ void set_Q_frag(uint32_t* Q_frag, half2* Q_half2, int bid, int wid, i
   }
 }
 
+__device__ void set_Q_frag_uint64(volatile uint32_t* Q_frag, uint64_t* Q, int bid, int wid, int laneid, int numNodes, int embedding_dim){
+   // Threads of a warp for fetching a 16X16 block of Q.
+  // DOC: https://docs.nvidia.com/cuda/parallel-thread-execution/index.html?highlight=wmma#matrix-fragments-for-mma-m16n8k16-with-floating-point-type
+  // Here I'm swapping columns of Q to make the memory access more coalesced. 
+  // So when loading K, we have to swap the rows accordingly in order to get the same result.
+  int rowIdx = bid * BLK_M + laneid/4;
+  // /4 because half4.
+  int colIdx = wid * BLK_K/4 + (laneid%4);
+  if(rowIdx < numNodes){
+    uint64_t val = Q[rowIdx * embedding_dim/4 + colIdx];
+    Q_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
+    Q_frag[2] = static_cast<uint32_t>(val >> 32);
+  }
+  if(rowIdx + 8 < numNodes){
+    uint64_t val = Q[(rowIdx+8) * embedding_dim/4 + colIdx];
+    Q_frag[1] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
+    Q_frag[3] = static_cast<uint32_t>(val >> 32);
+  }
+}
+
 __device__ void print(float* sum, int bid, int wid, int laneid){
   if(bid == 1 && wid == 0 && laneid == 0){
     printf("sum: \n");
@@ -1193,8 +1213,7 @@ __global__ void f3s_m16n8k16_cuda_kernel(
   volatile int laneid = threadIdx.x; // lanid of each warp.
   // int tid = laneid + wid * blockDim.x;
 
-  half2* K_half2 = reinterpret_cast<half2*>(K); 
-  half2* Q_half2 = reinterpret_cast<half2*>(Q);
+  uint64_t* K_uint64 = reinterpret_cast<uint64_t*>(K);
 
   // int nid_start = bid * BLK_H; 
   // int nid_end = min((bid + 1) * BLK_H, numNodes); 
@@ -1202,26 +1221,25 @@ __global__ void f3s_m16n8k16_cuda_kernel(
 
   // m, r (size BLK_M each) for online-softmax, in this order.
   extern __shared__ float row_max_row_sum []; 
-  float* row_max = row_max_row_sum;
-  float* row_sum = row_max_row_sum + BLK_M;
+  // float* row_max = row_max_row_sum;
+  // float* row_sum = row_max_row_sum + BLK_M;
   if(tid < BLK_M){
     row_max_row_sum[tid] = 0.0f;
     row_max_row_sum[BLK_M + tid] = 0.0f;
   }
  
-  uint32_t Q_frag[4] = {0};
+  volatile uint32_t Q_frag[4] = {0};
   // sddmm intermediate, 
   // TODO: this can probably be disallocated during spmm phase
   float D_frag[8];
   float O_frag[8] = {0};// spmm result
-  float zero = 0.0f;
   
   for(int i = tid; i < BLK_M * BLK_N * 2; i += blockDim.x * blockDim.y){
     sum[i] = 0.0f;
   }
  
-  set_Q_frag(Q_frag, Q_half2, bid, wid, laneid, numNodes, embedding_dim);
-
+  // set_Q_frag(Q_frag, Q_half2, bid, wid, laneid, numNodes, embedding_dim);
+  set_Q_frag_uint64(Q_frag, reinterpret_cast<uint64_t*>(Q), bid, wid, laneid, numNodes, embedding_dim);
 	// int tcb_id_start = TCblock_rowid[bid];
 	// int tcb_id_end = TCblock_rowid[bid + 1];
 
@@ -1242,15 +1260,15 @@ __global__ void f3s_m16n8k16_cuda_kernel(
     // +i instead of +i*4 because of the col swap
     {
       uint32_t B_frag[2];
-      half2_uint32 h2U32Converter;
-      int colIdx = (wid * BLK_M)/2 + (laneid % 4)*2; 
+      float zero = 0.0f;
+      // half2_uint32 h2U32Converter;
+      int colIdx = (wid * BLK_M)/4 + (laneid % 4); 
       for(int i = 0; i < 2; i++){
         if(!last_block || i == 0){
           int rowIdx = sparse_AToX_idx[(tcb_id+i) * BLK_N + laneid / 4]; 
-          h2U32Converter.h2 = K_half2[rowIdx * embedding_dim/2 + colIdx];
-          B_frag[0] = h2U32Converter.u32;
-          h2U32Converter.h2 = K_half2[rowIdx * embedding_dim/2 + colIdx + 1];
-          B_frag[1] = h2U32Converter.u32;
+          uint64_t val = K_uint64[rowIdx * embedding_dim/4 + colIdx];
+          B_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
+          B_frag[1] = static_cast<uint32_t>(val >> 32);
           HMMA16816(D_frag[i*4+0], D_frag[i*4+1], D_frag[i*4+2], D_frag[i*4+3], 
                     Q_frag[0], Q_frag[1], Q_frag[2], Q_frag[3], 
                     B_frag[0], B_frag[1], 
@@ -1285,14 +1303,14 @@ __global__ void f3s_m16n8k16_cuda_kernel(
         }
         //max of the 4 elements in the same row across 2 16x8 blocks
         //need every warp to do this because they will need it for the next computation
-        float max_old = row_max[j*BLK_N + laneid/4];
+        float max_old = row_max_row_sum[j*BLK_N + laneid/4];
         max[j] = fmaxf(
           fmaxf(fmaxf(D_frag[j*2], D_frag[j*2+1]), fmaxf(D_frag[j*2+4], D_frag[j*2+5])), 
           max_old);
         reduce_max(max[j], laneid);
         exp_max_diff[j] = expf(max_old - max[j]);
         if(wid == 0 && laneid % 4 == 0){
-          row_max[j*BLK_N + laneid/4] = max[j];
+          row_max_row_sum[j*BLK_N + laneid/4] = max[j];
         }
       }
       // computes E_b and 
@@ -1311,7 +1329,7 @@ __global__ void f3s_m16n8k16_cuda_kernel(
           float sum = D_frag[i*2] + D_frag[i*2+1] + D_frag[i*2+4] + D_frag[i*2+5];
           reduce_sum(sum);
           if(laneid % 4 == 0){
-            row_sum[i*BLK_N + laneid/4] = row_sum[i*BLK_N + laneid/4] * exp_max_diff[i] + sum;
+            row_max_row_sum[BLK_M + i*BLK_N + laneid/4] = row_max_row_sum[BLK_M + i*BLK_N + laneid/4] * exp_max_diff[i] + sum;
           }
         }
       }
@@ -1357,18 +1375,18 @@ __global__ void f3s_m16n8k16_cuda_kernel(
     // SpMM
     /////////
     {
-      half temp_V[4];
       uint32_t B_frag[2];
       half2_uint32 h2U32Converter;
+      half temp_V[2];
       for(int j = 0; j < 2; j++){// 2 16x8 blocks
         int colIdx = (wid*2+j) * BLK_N + laneid/4;
         for(int i = 0; i < 2; i++){// 2 8x8 blocks in each 16x8 block
           if(!last_block || i == 0){
             for(int k = 0; k < 2; k++){// 2 halfs in each 8x8 block
               int rowIdx = sparse_AToX_idx[(tcb_id+i) * BLK_N + (laneid%4)*2 + k];
-              temp_V[i*2 + k] = V[rowIdx * embedding_dim + colIdx];
+              temp_V[k] = V[rowIdx * embedding_dim + colIdx];
             }
-            h2U32Converter.h2 = __halves2half2(temp_V[i*2], temp_V[i*2 + 1]);
+            h2U32Converter.h2 = __halves2half2(temp_V[0], temp_V[1]);
             B_frag[i] = h2U32Converter.u32;
           }
           else{
@@ -1386,10 +1404,10 @@ __global__ void f3s_m16n8k16_cuda_kernel(
     for(int i = 0; i < 2; i++){
       int row_sum_offset = i*BLK_N + laneid/4;
       for(int j = 0; j < 2; j++){
-        if(row_sum[row_sum_offset] != 0.0f){
+        if(row_max_row_sum[BLK_M + row_sum_offset] != 0.0f){
           int O_offset = i*2 + j*4;
-          O_frag[O_offset] = O_frag[O_offset] * (1.0f/row_sum[row_sum_offset]);
-          O_frag[O_offset + 1] = O_frag[O_offset + 1] * (1.0f/row_sum[row_sum_offset]);
+          O_frag[O_offset] = O_frag[O_offset] * (1.0f/row_max_row_sum[BLK_M + row_sum_offset]);
+          O_frag[O_offset + 1] = O_frag[O_offset + 1] * (1.0f/row_max_row_sum[BLK_M + row_sum_offset]);
         }
       }
     }
