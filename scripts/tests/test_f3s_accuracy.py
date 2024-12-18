@@ -189,12 +189,6 @@ def main():
     edgeToRow_cuda  = edgeToRow.cuda()
     indptr = torch.IntTensor(A_csr_h_padded.indices).cuda()
     indices = torch.IntTensor(A_csr_h_padded.indptr).cuda()
-    print(indptr.shape)
-    print(indptr.device)
-    print(indptr.dtype)
-    print(indices.shape)
-    print(indices.device)
-    print(indices.dtype)
     RowWindowOffset, TCblockRowid,\
     TCblocktileId, TCblockoffset, SparseAToXindex,\
     TCblockBitMap, block_count = TCFMM.preprocess_gpu(indptr, indices, size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
@@ -205,6 +199,8 @@ def main():
     f3s_time = (time.time() - start_time)/n_runs
     print(f"f3s_time: {f3s_time}")
     rel_err = torch.norm(sddmm_result - sddmm_true) / sddmm_true_norm
+    # print(f"sddmm_result: \n{sddmm_result}")
+    # print(f"sddmm_true: \n{sddmm_true}")
     f3s_v_true_fp32_sddmm.append(rel_err.item())
     torch.set_printoptions(precision=2)
     rel_err = torch.norm(fusedR - true) / true_norm
