@@ -81,17 +81,17 @@ preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
 }
 
 
-std::vector<torch::Tensor> 
-fusedMM_forward_cuda(
-	torch::Tensor TCblock_rowid, torch::Tensor TCblocktile_id,
-  torch::Tensor TCblock_offset, torch::Tensor sparse_AToX_idx,
-  int num_nodes, int num_edges,
-  int embedding_dim,  // embedding dimension.
-  torch::Tensor input, // input feature matrix.
-  bool save_edge_attention,
-  bool use_f32_edge_attention,
-  bool use_m8n32k16
-);
+// std::vector<torch::Tensor> 
+// fusedMM_forward_cuda(
+// 	torch::Tensor TCblock_rowid, torch::Tensor TCblocktile_id,
+//   torch::Tensor TCblock_offset, torch::Tensor sparse_AToX_idx,
+//   int num_nodes, int num_edges,
+//   int embedding_dim,  // embedding dimension.
+//   torch::Tensor input, // input feature matrix.
+//   bool save_edge_attention,
+//   bool use_f32_edge_attention,
+//   bool use_m8n32k16
+// );
 
 std::vector<torch::Tensor> 
 f3S_forward_cuda(
@@ -105,44 +105,44 @@ f3S_forward_cuda(
   bool save_sddmm_result
 );
 
-std::vector<torch::Tensor>
-fusedMM_forward(torch::Tensor input, torch::Tensor TCblock_rowid,
-                torch::Tensor TCblocktile_id,
-                torch::Tensor TCblock_offset,
-                torch::Tensor sparse_AToX_idx, int num_nodes, 
-                bool save_edge_attention,
-                bool use_f32_edge_attention,
-                bool use_m8n32k16) {
-  CHECK_INPUT(input);
-  CHECK_INPUT(TCblock_rowid);
-  CHECK_INPUT(TCblocktile_id);
-  CHECK_INPUT(TCblock_offset);
-  CHECK_INPUT(sparse_AToX_idx);
+// std::vector<torch::Tensor>
+// fusedMM_forward(torch::Tensor input, torch::Tensor TCblock_rowid,
+//                 torch::Tensor TCblocktile_id,
+//                 torch::Tensor TCblock_offset,
+//                 torch::Tensor sparse_AToX_idx, int num_nodes, 
+//                 bool save_edge_attention,
+//                 bool use_f32_edge_attention,
+//                 bool use_m8n32k16) {
+//   CHECK_INPUT(input);
+//   CHECK_INPUT(TCblock_rowid);
+//   CHECK_INPUT(TCblocktile_id);
+//   CHECK_INPUT(TCblock_offset);
+//   CHECK_INPUT(sparse_AToX_idx);
 
-  int num_edges = TCblocktile_id.size(0);
-  int embedding_dim = input.size(1);
+//   int num_edges = TCblocktile_id.size(0);
+//   int embedding_dim = input.size(1);
 
-  cudaEvent_t start, stop;
-  float elapsedTime;
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
-  cudaEventRecord(start, 0);
-  auto result = fusedMM_forward_cuda(TCblock_rowid, TCblocktile_id, 
-                                     TCblock_offset, sparse_AToX_idx, 
-                                     num_nodes, num_edges, 
-                                     embedding_dim, 
-                                     input, 
-                                     save_edge_attention,
-                                     use_f32_edge_attention,
-                                     use_m8n32k16);
-  cudaEventRecord(stop, 0);
-  cudaEventSynchronize(stop);
-  cudaEventElapsedTime(&elapsedTime, start, stop);
-  cudaEventDestroy(start);
-  cudaEventDestroy(stop);
-  printf("fusedMM execution time (cuda events): %f ms\n", elapsedTime);
-  return result;
-}
+//   cudaEvent_t start, stop;
+//   float elapsedTime;
+//   cudaEventCreate(&start);
+//   cudaEventCreate(&stop);
+//   cudaEventRecord(start, 0);
+//   auto result = fusedMM_forward_cuda(TCblock_rowid, TCblocktile_id, 
+//                                      TCblock_offset, sparse_AToX_idx, 
+//                                      num_nodes, num_edges, 
+//                                      embedding_dim, 
+//                                      input, 
+//                                      save_edge_attention,
+//                                      use_f32_edge_attention,
+//                                      use_m8n32k16);
+//   cudaEventRecord(stop, 0);
+//   cudaEventSynchronize(stop);
+//   cudaEventElapsedTime(&elapsedTime, start, stop);
+//   cudaEventDestroy(start);
+//   cudaEventDestroy(stop);
+//   printf("fusedMM execution time (cuda events): %f ms\n", elapsedTime);
+//   return result;
+// }
 
 std::vector<torch::Tensor>
 f3S_forward(torch::Tensor TCblock_rowid,
