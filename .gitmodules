@@ -4,3 +4,6 @@
 [submodule "Fused3S/baselines"]
 	path = Fused3S/baselines
 	url = https://github.com/danielhse/DTC-SpMM_ASPLOS24.git
+[submodule "baselines/DTC-SpMM_ASPLOS24"]
+	path = baselines/DTC-SpMM_ASPLOS24
+	url = https://github.com/danielhse/DTC-SpMM_ASPLOS24.git
