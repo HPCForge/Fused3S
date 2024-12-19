@@ -95,7 +95,7 @@ preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
 
 std::vector<torch::Tensor> 
 f3S_forward_cuda(
-  torch::Tensor TCblock_rowid,
+  torch::Tensor row_window_offset,
   torch::Tensor sparse_AToX_idx, 
   torch::Tensor TCblock_bit_map,
   int num_nodes, 
@@ -175,7 +175,7 @@ f3S_sddmm(
 }
 
 std::vector<torch::Tensor>
-f3S_forward(torch::Tensor TCblock_rowid,
+f3S_forward(torch::Tensor row_window_offset,
             torch::Tensor sparse_AToX_idx, 
             torch::Tensor TCblock_bit_map,
             int num_nodes, 
@@ -185,7 +185,7 @@ f3S_forward(torch::Tensor TCblock_rowid,
   CHECK_INPUT(Q);
   CHECK_INPUT(K);
   CHECK_INPUT(V);
-  CHECK_INPUT(TCblock_rowid);
+  CHECK_INPUT(row_window_offset);
   CHECK_INPUT(sparse_AToX_idx);
   CHECK_INPUT(TCblock_bit_map);
   cudaEvent_t start, stop;
@@ -195,7 +195,7 @@ f3S_forward(torch::Tensor TCblock_rowid,
 
   int embedding_dim = Q.size(1);
   cudaEventRecord(start, 0);
-  auto result = f3S_forward_cuda(TCblock_rowid, 
+  auto result = f3S_forward_cuda(row_window_offset, 
                                  sparse_AToX_idx, 
                                  TCblock_bit_map,
                                  num_nodes, 

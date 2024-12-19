@@ -17,7 +17,8 @@ def run_f3s(indptr, indices, num_nodes, num_edges, Q, K, V, BLK_H, BLK_W):
   apply_softmax = True
   save_sddmm_result = False
   TCFMM.f3S_forward(RowWindowOffset, SparseAToXindex, TCblockBitMap, num_nodes, Q, K, V, apply_softmax, save_sddmm_result)
-
+  TCFMM.f3S_sddmm(RowWindowOffset, TCblockRowid, SparseAToXindex, TCblockBitMap, num_nodes, Q, K)
+  
 def main():
   BLK_H = 16
   BLK_W = 8

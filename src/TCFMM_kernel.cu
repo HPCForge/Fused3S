@@ -1378,148 +1378,148 @@ __global__ void f3s_m16n8k16_cuda_kernel(
       save_sddmm_result(sum, sddmm_result, tcb_id, last_block);
     }
 
-    {// softmax + spmm
-      uint32_t S_frag[4];// softmax/sddmm result
-      if(apply_softmax){
-        float D_frag[4];
-        float2* sum_float2 = reinterpret_cast<float2*>(sum);
-        for(int j = 0; j < 2; j++){// 2 8x8 blocks in each 16x8 block
-          int sum_offset = j*BLK_N*BLK_N/2;
-          for(int i = 0; i < 2; i++){// 2 16x8 blocks
-            if(!last_block || i == 0){
-              float2 temp = sum_float2[i*BLK_M*BLK_N/2 + sum_offset + laneid];
-              D_frag[i*2] = temp.x;
-              D_frag[i*2 + 1] = temp.y;
-            }
-            else{
-              D_frag[i*2] = 0.0f;
-              D_frag[i*2 + 1] = 0.0f;
-            }
-          }
-          //max of the 4 elements in the same row across 2 16x8 blocks
-          //need every warp to do this because they will need it for the next computation
-          float max_old = dyn_shm[j*BLK_N + laneid/4];
+    // {// softmax + spmm
+    //   uint32_t S_frag[4];// softmax/sddmm result
+    //   if(apply_softmax){
+    //     float D_frag[4];
+    //     float2* sum_float2 = reinterpret_cast<float2*>(sum);
+    //     for(int j = 0; j < 2; j++){// 2 8x8 blocks in each 16x8 block
+    //       int sum_offset = j*BLK_N*BLK_N/2;
+    //       for(int i = 0; i < 2; i++){// 2 16x8 blocks
+    //         if(!last_block || i == 0){
+    //           float2 temp = sum_float2[i*BLK_M*BLK_N/2 + sum_offset + laneid];
+    //           D_frag[i*2] = temp.x;
+    //           D_frag[i*2 + 1] = temp.y;
+    //         }
+    //         else{
+    //           D_frag[i*2] = 0.0f;
+    //           D_frag[i*2 + 1] = 0.0f;
+    //         }
+    //       }
+    //       //max of the 4 elements in the same row across 2 16x8 blocks
+    //       //need every warp to do this because they will need it for the next computation
+    //       float max_old = dyn_shm[j*BLK_N + laneid/4];
 
-          float max = fmaxf(
-            fmaxf(fmaxf(D_frag[0], D_frag[1]), fmaxf(D_frag[2], D_frag[3])), 
-            max_old);
-          reduce_max(max, laneid);
+    //       float max = fmaxf(
+    //         fmaxf(fmaxf(D_frag[0], D_frag[1]), fmaxf(D_frag[2], D_frag[3])), 
+    //         max_old);
+    //       reduce_max(max, laneid);
 
-          for(int i = 0; i < 4; i++){
-            if(D_frag[i] != 0.0f){
-              D_frag[i] = __expf(D_frag[i] - max);
-            }
-          }
+    //       for(int i = 0; i < 4; i++){
+    //         if(D_frag[i] != 0.0f){
+    //           D_frag[i] = __expf(D_frag[i] - max);
+    //         }
+    //       }
 
-          float exp_max_diff = __expf(max_old - max);
+    //       float exp_max_diff = __expf(max_old - max);
 
-          if(wid == 0){
-            float sum = D_frag[0] + D_frag[1] + D_frag[2] + D_frag[3];
-            reduce_sum(sum);
-            if(laneid % 4 == 0){
-              dyn_shm[BLK_M + j*BLK_N + laneid/4] = dyn_shm[BLK_M + j*BLK_N + laneid/4] * exp_max_diff + sum;
-            }
-          }
+    //       if(wid == 0){
+    //         float sum = D_frag[0] + D_frag[1] + D_frag[2] + D_frag[3];
+    //         reduce_sum(sum);
+    //         if(laneid % 4 == 0){
+    //           dyn_shm[BLK_M + j*BLK_N + laneid/4] = dyn_shm[BLK_M + j*BLK_N + laneid/4] * exp_max_diff + sum;
+    //         }
+    //       }
 
-          O_frag[j*2]   = O_frag[j*2]   * exp_max_diff;
-          O_frag[j*2+1] = O_frag[j*2+1] * exp_max_diff;
-          O_frag[j*2+4] = O_frag[j*2+4] * exp_max_diff;
-          O_frag[j*2+5] = O_frag[j*2+5] * exp_max_diff;
-          // float* O_frag = dyn_shm + BLK_M*2 + blockDim.x*blockDim.y*4 + wid*blockDim.x*8;
-          // O_frag[blockDim.x*j*2 + laneid]     = O_frag[blockDim.x*j*2 + laneid]   * (exp_max_diff);
-          // O_frag[blockDim.x*(j*2+1) + laneid] = O_frag[blockDim.x*(j*2+1) + laneid] * (exp_max_diff);
-          // O_frag[blockDim.x*(j*2+4) + laneid] = O_frag[blockDim.x*(j*2+4) + laneid] * (exp_max_diff);
-          // O_frag[blockDim.x*(j*2+5) + laneid] = O_frag[blockDim.x*(j*2+5) + laneid] * (exp_max_diff);
+    //       O_frag[j*2]   = O_frag[j*2]   * exp_max_diff;
+    //       O_frag[j*2+1] = O_frag[j*2+1] * exp_max_diff;
+    //       O_frag[j*2+4] = O_frag[j*2+4] * exp_max_diff;
+    //       O_frag[j*2+5] = O_frag[j*2+5] * exp_max_diff;
+    //       // float* O_frag = dyn_shm + BLK_M*2 + blockDim.x*blockDim.y*4 + wid*blockDim.x*8;
+    //       // O_frag[blockDim.x*j*2 + laneid]     = O_frag[blockDim.x*j*2 + laneid]   * (exp_max_diff);
+    //       // O_frag[blockDim.x*(j*2+1) + laneid] = O_frag[blockDim.x*(j*2+1) + laneid] * (exp_max_diff);
+    //       // O_frag[blockDim.x*(j*2+4) + laneid] = O_frag[blockDim.x*(j*2+4) + laneid] * (exp_max_diff);
+    //       // O_frag[blockDim.x*(j*2+5) + laneid] = O_frag[blockDim.x*(j*2+5) + laneid] * (exp_max_diff);
 
-          if(wid == 0 && laneid % 4 == 0){
-            dyn_shm[j*BLK_N + laneid/4] = max;
-          }
+    //       if(wid == 0 && laneid % 4 == 0){
+    //         dyn_shm[j*BLK_N + laneid/4] = max;
+    //       }
 
-          half2_uint32 h2U32Converter;
-          for(int i = 0; i < 2; i++){
-            h2U32Converter.h2.x = __float2half(D_frag[i*2]);
-            h2U32Converter.h2.y = __float2half(D_frag[i*2+1]);
-            S_frag[i*2 + j] = h2U32Converter.u32;
-          }
-        }
-      }
-      else{
-        float2* sum_float2 = reinterpret_cast<float2*>(sum);
-        for(int i = 0; i < 2; i++){// 2 16x8 blocks
-          int sum_offset = i*BLK_M*BLK_N/2;
-          half2_uint32 h2U32Converter;
-          if(!last_block || i == 0){
-            for(int j = 0; j < 2; j++){// 2 8x8 blocks in each 16x8 block
-              float2 temp = sum_float2[sum_offset + j*BLK_N*BLK_N/2 + laneid];
-              h2U32Converter.h2.x = __float2half(temp.x);
-              h2U32Converter.h2.y = __float2half(temp.y);
-              S_frag[i*2+j] = h2U32Converter.u32;
-            }
-          }
-          else{
-            S_frag[i*2] = 0;
-            S_frag[i*2+1] = 0;
-          }
-        }
-      }
-      __syncthreads();
-      //reset sum to 0
-      // for(int i = tid; i < BLK_M * BLK_N * 2; i += blockDim.x * blockDim.y){
-      //   sum[i] = 0.0f;
-      // }
-      for(int i = laneid; i < BLK_M*BLK_M; i += blockDim.x){
-        sum[wid*BLK_M*BLK_M + i] = 0.0f;
-      }
-      /////////
-      // SpMM
-      /////////
-      {
-        uint32_t B_frag[2];
-        half2_uint32 h2U32Converter;
-        half temp_V[2];
-        // float* O_frag = dyn_shm + BLK_M*2 + blockDim.x*blockDim.y*4 + wid*blockDim.x*8;
-        for(int j = 0; j < 2; j++){// 2 16x8 blocks
-          int colIdx = (wid*2+j) * BLK_N + laneid/4;
-          for(int i = 0; i < 2; i++){// 2 8x8 blocks in each 16x8 block
-            if(!last_block || i == 0){
-              for(int k = 0; k < 2; k++){// 2 halfs in each 8x8 block
-                int rowIdx = sparse_AToX_idx[(tcb_id+i) * BLK_N + (laneid%4)*2 + k];
-                temp_V[k] = V[rowIdx * embedding_dim + colIdx];
-              }
-              h2U32Converter.h2 = __halves2half2(temp_V[0], temp_V[1]);
-              B_frag[i] = h2U32Converter.u32;
-            }
-            else{
-              B_frag[i] = 0;
-            }
-          }
-          // HMMA16816(O_frag[blockDim.x*j*4 + laneid], O_frag[blockDim.x*(j*4+1) + laneid], O_frag[blockDim.x*(j*4+2) + laneid], O_frag[blockDim.x*(j*4+3) + laneid], 
-          HMMA16816(O_frag[4*j], O_frag[4*j+1], O_frag[4*j+2], O_frag[4*j+3],
-                    S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
-                    B_frag[0], B_frag[1], 
-                    // O_frag[blockDim.x*4*j + laneid], O_frag[blockDim.x*(4*j+1) + laneid], O_frag[blockDim.x*(4*j+2) + laneid], O_frag[blockDim.x*(4*j+3) + laneid]);
-                    O_frag[4*j], O_frag[4*j+1], O_frag[4*j+2], O_frag[4*j+3]);
-        }
-      }
-    }
+    //       half2_uint32 h2U32Converter;
+    //       for(int i = 0; i < 2; i++){
+    //         h2U32Converter.h2.x = __float2half(D_frag[i*2]);
+    //         h2U32Converter.h2.y = __float2half(D_frag[i*2+1]);
+    //         S_frag[i*2 + j] = h2U32Converter.u32;
+    //       }
+    //     }
+    //   }
+    //   else{
+    //     float2* sum_float2 = reinterpret_cast<float2*>(sum);
+    //     for(int i = 0; i < 2; i++){// 2 16x8 blocks
+    //       int sum_offset = i*BLK_M*BLK_N/2;
+    //       half2_uint32 h2U32Converter;
+    //       if(!last_block || i == 0){
+    //         for(int j = 0; j < 2; j++){// 2 8x8 blocks in each 16x8 block
+    //           float2 temp = sum_float2[sum_offset + j*BLK_N*BLK_N/2 + laneid];
+    //           h2U32Converter.h2.x = __float2half(temp.x);
+    //           h2U32Converter.h2.y = __float2half(temp.y);
+    //           S_frag[i*2+j] = h2U32Converter.u32;
+    //         }
+    //       }
+    //       else{
+    //         S_frag[i*2] = 0;
+    //         S_frag[i*2+1] = 0;
+    //       }
+    //     }
+    //   }
+    //   __syncthreads();
+    //   //reset sum to 0
+    //   // for(int i = tid; i < BLK_M * BLK_N * 2; i += blockDim.x * blockDim.y){
+    //   //   sum[i] = 0.0f;
+    //   // }
+    //   for(int i = laneid; i < BLK_M*BLK_M; i += blockDim.x){
+    //     sum[wid*BLK_M*BLK_M + i] = 0.0f;
+    //   }
+    //   /////////
+    //   // SpMM
+    //   /////////
+    //   {
+    //     uint32_t B_frag[2];
+    //     half2_uint32 h2U32Converter;
+    //     half temp_V[2];
+    //     // float* O_frag = dyn_shm + BLK_M*2 + blockDim.x*blockDim.y*4 + wid*blockDim.x*8;
+    //     for(int j = 0; j < 2; j++){// 2 16x8 blocks
+    //       int colIdx = (wid*2+j) * BLK_N + laneid/4;
+    //       for(int i = 0; i < 2; i++){// 2 8x8 blocks in each 16x8 block
+    //         if(!last_block || i == 0){
+    //           for(int k = 0; k < 2; k++){// 2 halfs in each 8x8 block
+    //             int rowIdx = sparse_AToX_idx[(tcb_id+i) * BLK_N + (laneid%4)*2 + k];
+    //             temp_V[k] = V[rowIdx * embedding_dim + colIdx];
+    //           }
+    //           h2U32Converter.h2 = __halves2half2(temp_V[0], temp_V[1]);
+    //           B_frag[i] = h2U32Converter.u32;
+    //         }
+    //         else{
+    //           B_frag[i] = 0;
+    //         }
+    //       }
+    //       // HMMA16816(O_frag[blockDim.x*j*4 + laneid], O_frag[blockDim.x*(j*4+1) + laneid], O_frag[blockDim.x*(j*4+2) + laneid], O_frag[blockDim.x*(j*4+3) + laneid], 
+    //       HMMA16816(O_frag[4*j], O_frag[4*j+1], O_frag[4*j+2], O_frag[4*j+3],
+    //                 S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
+    //                 B_frag[0], B_frag[1], 
+    //                 // O_frag[blockDim.x*4*j + laneid], O_frag[blockDim.x*(4*j+1) + laneid], O_frag[blockDim.x*(4*j+2) + laneid], O_frag[blockDim.x*(4*j+3) + laneid]);
+    //                 O_frag[4*j], O_frag[4*j+1], O_frag[4*j+2], O_frag[4*j+3]);
+    //     }
+    //   }
+    // }
   }
-  // float* O_frag = dyn_shm + BLK_M*2 + blockDim.x*blockDim.y*4 + wid*blockDim.x*8;
-  if(apply_softmax){
-    for(int i = 0; i < 2; i++){
-      float row_sum = dyn_shm[BLK_M + laneid/4 + i*BLK_N ];
-      if(row_sum != 0.0f){
-        // O_frag[blockDim.x*i*2 + laneid] = O_frag[blockDim.x*i*2 + laneid] * (1.0f/row_sum);
-        // O_frag[blockDim.x*(i*2+1) + laneid] = O_frag[blockDim.x*(i*2+1) + laneid] * (1.0f/row_sum);
-        // O_frag[blockDim.x*(i*2+4) + laneid] = O_frag[blockDim.x*(i*2+4) + laneid] * (1.0f/row_sum);
-        // O_frag[blockDim.x*(i*2+5) + laneid] = O_frag[blockDim.x*(i*2+5) + laneid] * (1.0f/row_sum);
-        O_frag[i*2] = O_frag[i*2] * (1.0f/row_sum);
-        O_frag[(i*2+1)] = O_frag[(i*2+1)] * (1.0f/row_sum);
-        O_frag[(i*2+4)] = O_frag[(i*2+4)] * (1.0f/row_sum);
-        O_frag[(i*2+5)] = O_frag[(i*2+5)] * (1.0f/row_sum);
+  // // float* O_frag = dyn_shm + BLK_M*2 + blockDim.x*blockDim.y*4 + wid*blockDim.x*8;
+  // if(apply_softmax){
+  //   for(int i = 0; i < 2; i++){
+  //     float row_sum = dyn_shm[BLK_M + laneid/4 + i*BLK_N ];
+  //     if(row_sum != 0.0f){
+  //       // O_frag[blockDim.x*i*2 + laneid] = O_frag[blockDim.x*i*2 + laneid] * (1.0f/row_sum);
+  //       // O_frag[blockDim.x*(i*2+1) + laneid] = O_frag[blockDim.x*(i*2+1) + laneid] * (1.0f/row_sum);
+  //       // O_frag[blockDim.x*(i*2+4) + laneid] = O_frag[blockDim.x*(i*2+4) + laneid] * (1.0f/row_sum);
+  //       // O_frag[blockDim.x*(i*2+5) + laneid] = O_frag[blockDim.x*(i*2+5) + laneid] * (1.0f/row_sum);
+  //       O_frag[i*2] = O_frag[i*2] * (1.0f/row_sum);
+  //       O_frag[(i*2+1)] = O_frag[(i*2+1)] * (1.0f/row_sum);
+  //       O_frag[(i*2+4)] = O_frag[(i*2+4)] * (1.0f/row_sum);
+  //       O_frag[(i*2+5)] = O_frag[(i*2+5)] * (1.0f/row_sum);
         
-      }
-    }
-  }
+  //     }
+  //   }
+  // }
   for(int j=0; j < 2; j++){// 2 8x8 blocks in each 16x8 block
     int rowIdx = bid * BLK_M + (laneid / 4) + j * BLK_M/2;
     for(int i =0; i < 2; i++){// 2 16x8 blocks

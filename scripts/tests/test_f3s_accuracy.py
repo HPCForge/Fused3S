@@ -107,9 +107,11 @@ def main():
   BLK_H = 16
   BLK_W = 8
   n_heads = 1
-  feature_size = 64
-  size = 64
+  feature_size = 320
+  size = 1000
   density = 0.2
+  # whether to use new parallel strategy where each warp computes a tcb
+  warp_tcb = True
   apply_softmax = True
   half_v_float_sddmm = []
   half_v_float_softmax = []
@@ -166,11 +168,6 @@ def main():
     if apply_softmax:
       softmax_true_half_og_form = row_wise_softmax_mask(sddmm_half_og_form, A_dense_half)
       softmax_true_og_form = row_wise_softmax_mask(sddmm_og_form, A_dense)
-      softmax_true_half = process_matrix(softmax_true_half_og_form, BLK_H, BLK_W)
-      softmax_true = process_matrix(softmax_true_og_form, BLK_H, BLK_W)
-      softmax_true_norm = torch.norm(softmax_true)
-      rel_err = torch.norm(softmax_true - softmax_true_half)/softmax_true_norm
-      half_v_float_softmax.append(rel_err.item())
     S = softmax_true_og_form if apply_softmax else sddmm_og_form
     S_half = softmax_true_half_og_form if apply_softmax else sddmm_half_og_form
     true = S @ V
@@ -187,41 +184,40 @@ def main():
     blockPartition_cuda  = blockPartition.cuda()
     edgeToColumn_cuda = edgeToColumn.cuda()
     edgeToRow_cuda  = edgeToRow.cuda()
-    indptr = torch.IntTensor(A_csr_h_padded.indices).cuda()
-    indices = torch.IntTensor(A_csr_h_padded.indptr).cuda()
+    indptr = torch.IntTensor(A_csr_h.indices).cuda()
+    indices = torch.IntTensor(A_csr_h.indptr).cuda()
     RowWindowOffset, TCblockRowid,\
     TCblocktileId, TCblockoffset, SparseAToXindex,\
     TCblockBitMap, block_count = TCFMM.preprocess_gpu(indptr, indices, size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
 
     start_time = time.time()
     for i in range(n_runs):
-       fusedR, sddmm_result = TCFMM.f3S_forward(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, apply_softmax, save_sddmm_result)
-      # sddmm_result = TCFMM.f3S_sddmm(RowWindowOffset, TCblockRowid, SparseAToXindex, TCblockBitMap, size, Q_half, K_half)
+      if warp_tcb:
+        sddmm_result = TCFMM.f3S_sddmm(RowWindowOffset, TCblockRowid, SparseAToXindex, TCblockBitMap, size, Q_half, K_half)[0]
+        fusedR = None
+      else:
+        fusedR, sddmm_result = TCFMM.f3S_forward(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, apply_softmax, save_sddmm_result)
     f3s_time = (time.time() - start_time)/n_runs
     print(f"f3s_time: {f3s_time}")
-    sddmm_result = sddmm_result[0]
-    # for i in range(sddmm_result.nelement()//64):
-    #   print(f"------------------i: {i}------------------")
-    #   if(torch.max(torch.abs(sddmm_result[i*64:(i+1)*64] - sddmm_true[i*64:(i+1)*64])) > 1e-3):
-    #     print(f"sddmm_result: \n{sddmm_result[i*64:(i+1)*64].view(8, 8)}")
-    #     print(f"sddmm_true: \n{sddmm_true[i*64:(i+1)*64].view(8, 8)}")
     rel_err = torch.norm(sddmm_result - sddmm_true) / sddmm_true_norm
-    # print(f"sddmm_result: \n{sddmm_result}")
-    # print(f"sddmm_true: \n{sddmm_true}")
     f3s_v_true_fp32_sddmm.append(rel_err.item())
-    torch.set_printoptions(precision=2)
-    # rel_err = torch.norm(fusedR - true) / true_norm
-    # f3s_v_true_fp32_final.append(rel_err.item())
+    if fusedR is not None:
+      rel_err = torch.norm(fusedR - true) / true_norm
+      f3s_v_true_fp32_final.append(rel_err.item())
 
   half_v_float_sddmm_mean = np.mean(np.array(half_v_float_sddmm))
-  half_v_float_final_mean = np.mean(np.array(half_v_float_final))
-  f3s_v_true_fp32_sddmm = np.mean(np.array(f3s_v_true_fp32_sddmm))
-  # f3s_v_true_fp32_final = np.mean(np.array(f3s_v_true_fp32_final))
-
   print(f"sddmm pytorch half vs single: {half_v_float_sddmm_mean}")
+
+  half_v_float_final_mean = np.mean(np.array(half_v_float_final))
   print(f"final solution pytorch half vs float: {half_v_float_final_mean}")
+
+  f3s_v_true_fp32_sddmm = np.mean(np.array(f3s_v_true_fp32_sddmm))
   print(f"f3s sddmm vs pytorch float: {f3s_v_true_fp32_sddmm}")
-  # print(f"f3s final solution vs pytorch float: {f3s_v_true_fp32_final}")
+
+  if fusedR is not None:
+    f3s_v_true_fp32_final = np.mean(np.array(f3s_v_true_fp32_final))
+    print(f"f3s final solution vs pytorch float: {f3s_v_true_fp32_final}")
+
 
 if __name__ == "__main__":
   main()
