@@ -105,6 +105,16 @@ f3S_forward_cuda(
   bool save_sddmm_result
 );
 
+std::vector<torch::Tensor>
+f3S_sddmm_cuda(
+  torch::Tensor RowWindowOffset,
+  torch::Tensor TCblock_rowid,
+  torch::Tensor sparse_AToX_idx, 
+  torch::Tensor TCblock_bit_map,
+  int num_nodes, 
+  int embedding_dim,
+  torch::Tensor Q, torch::Tensor K
+);
 // std::vector<torch::Tensor>
 // fusedMM_forward(torch::Tensor input, torch::Tensor TCblock_rowid,
 //                 torch::Tensor TCblocktile_id,
@@ -143,6 +153,26 @@ f3S_forward_cuda(
 //   printf("fusedMM execution time (cuda events): %f ms\n", elapsedTime);
 //   return result;
 // }
+
+std::vector<torch::Tensor>
+f3S_sddmm(
+  torch::Tensor RowWindowOffset,
+  torch::Tensor TCblock_rowid,
+  torch::Tensor sparse_AToX_idx, 
+  torch::Tensor TCblock_bit_map,
+  int num_nodes, 
+  torch::Tensor Q, torch::Tensor K
+){
+  CHECK_INPUT(RowWindowOffset);
+  CHECK_INPUT(TCblock_rowid);
+  CHECK_INPUT(sparse_AToX_idx);
+  CHECK_INPUT(TCblock_bit_map);
+  CHECK_INPUT(Q);
+  CHECK_INPUT(K);
+  int embedding_dim = Q.size(1);
+  auto result = f3S_sddmm_cuda(RowWindowOffset, TCblock_rowid, sparse_AToX_idx, TCblock_bit_map, num_nodes, embedding_dim, Q, K);
+  return result;
+}
 
 std::vector<torch::Tensor>
 f3S_forward(torch::Tensor TCblock_rowid,
@@ -184,6 +214,7 @@ f3S_forward(torch::Tensor TCblock_rowid,
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("preprocess_gpu", &preprocess_gpu, "Preprocess Step on (CUDA)");
-  m.def("fusedMM_forward", &fusedMM_forward, "FusedMM forward (CUDA)");
+  // m.def("fusedMM_forward", &fusedMM_forward, "FusedMM forward (CUDA)");
   m.def("f3S_forward", &f3S_forward, "fused Spmm-Softmax-Spmm (CUDA)");
+  m.def("f3S_sddmm", &f3S_sddmm, "fused Spmm-Spmm (CUDA)");
 }

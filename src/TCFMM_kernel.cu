@@ -656,7 +656,7 @@ std::vector<torch::Tensor> f3S_forward_cuda(
     bool save_sddmm_result){
   int nBlockEmbeddingDim = (embedding_dim + BLK_N - 1) / BLK_N;
   int nWarpPerBlock = (nBlockEmbeddingDim + TCBLOCK_PER_WARP - 1) / TCBLOCK_PER_WARP;
-  const int nRowWindow = TCblock_rowid.size(0) - 1;
+  const int nRowWindow = Rowwindow_offset.size(0) - 1;
   int paddedLength = nRowWindow * BLK_M;
   auto output = torch::zeros({paddedLength, embedding_dim}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
   dim3 grid(nRowWindow, 1, 1);
@@ -706,11 +706,11 @@ std::vector<torch::Tensor> f3S_sddmm_cuda(
     int embedding_dim,
     torch::Tensor Q, torch::Tensor K){
   int nRowWindow = Rowwindow_offset.size(0) - 1;
-  int paddedLength = nRowWindow * BLK_M;
   int nWarpPerBlock = 8;
+  int nTCBlock = sparse_AToX_idx.size(0)/BLK_N;
+  torch::Tensor sddmm_result = torch::zeros({nTCBlock*BLK_M*BLK_N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));  
   dim3 grid(nRowWindow, 1, 1);
   dim3 block(WARP_SIZE, nWarpPerBlock, 1);
-  auto output = torch::zeros({paddedLength, embedding_dim}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
   sddmm_kernel<<<grid, block>>>(
     Rowwindow_offset.data_ptr<int>(), 
     TCblock_rowid.data_ptr<int>(),
@@ -719,7 +719,16 @@ std::vector<torch::Tensor> f3S_sddmm_cuda(
     embedding_dim,
     Q.data_ptr<torch::Half>(), 
     K.data_ptr<torch::Half>(), 
-    reinterpret_cast<float2*>(output.data_ptr<float>()));
+    reinterpret_cast<float2*>(sddmm_result.data_ptr<float>()));
+   // check for error
+  cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    // print the CUDA error message and exit
+    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    exit(-1);
+  }
+  cudaDeviceSynchronize();
+  return {sddmm_result};
 }
 // std::vector<torch::Tensor> fusedMM_forward_cuda(
 // 	torch::Tensor Rowwindow_offset,
@@ -1523,11 +1532,11 @@ __global__ void f3s_m16n8k16_cuda_kernel(
   }
 }
 
-__device__ void load_Q_frag_uint64(uint32_t *Q_frag, uint64_t *Q, int embedding_dim, int rowIdx, int colIdx) {
+__device__ void load_Q_frag_uint64(volatile uint32_t *Q_frag, uint64_t *Q, int embedding_dim, int rowIdx, int colIdx) {
     uint64_t val = Q[rowIdx * embedding_dim + colIdx];
     Q_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
     Q_frag[2] = static_cast<uint32_t>(val >> 32);
-    uint64_t val = Q[(rowIdx+8) * embedding_dim + colIdx];
+    val = Q[(rowIdx+8) * embedding_dim + colIdx];
     Q_frag[1] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
     Q_frag[3] = static_cast<uint32_t>(val >> 32);
 }
@@ -1546,18 +1555,23 @@ __global__ void sddmm_kernel(
     int wid = threadIdx.y;
     // int bid = blockIdx.x;
     // int tid = wid * blockDim.x + laneid;
-    volatile float S_frag[4];
     volatile int tidInGroup = laneid % 4;
     for(int tcb_id = wid + RowWindowOffset[bid]; tcb_id < RowWindowOffset[bid+1]; tcb_id += blockDim.y) {
-        int rowIdx_Q = tcb_row_index[tcb_id]*BLK_M + laneid >> 2;
-        int rowIdx_K = sparseAtoX[tcb_id*BLK_N + laneid >> 2] * embedding_dim/4; 
+        volatile float S_frag[4] = {0.0f};
+        volatile uint32_t Q_frag[4];
+        volatile uint32_t K_frag[2];
+        int rowIdx_Q = tcb_row_index[tcb_id]*BLK_M + laneid/4;
+        int rowIdx_K = sparseAtoX[tcb_id*BLK_N + laneid/4] * embedding_dim/4; 
         for(int i = 0; i < embedding_dim/BLK_K; i++) {
             //load Q[row_start:row_start + BLK_M, i*BLK_N:i*BLK_N+BLK_N] using ldg64
-            uint32_t Q_frag[4];
             load_Q_frag_uint64(Q_frag, reinterpret_cast<uint64_t*>(Q), embedding_dim/4, rowIdx_Q, i*BLK_K/4 + tidInGroup);
             //load K
-            uint32_t K_frag[2];
             uint64_t val = reinterpret_cast<uint64_t*>(K)[rowIdx_K + i*BLK_K/4 + tidInGroup];
+            // if(bid==0){
+            //   printf("laneid: %d, i: %d, rowIdx_Q: %d, colIdx_Q: %d rowIdx_K: %d, colIdx_K: %d\n", laneid, i, rowIdx_Q, i*BLK_K/4 + tidInGroup, rowIdx_K, i*BLK_K/4 + tidInGroup);
+            //   printf("laneid: %d, Q_frag: %d %d %d %d\n", laneid, Q_frag[0], Q_frag[1], Q_frag[2], Q_frag[3]);
+            //   printf("laneid: %d, val: %llu\n", laneid, val);
+            // }
             K_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
             K_frag[1] = static_cast<uint32_t>(val >> 32);
             HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
@@ -1565,11 +1579,17 @@ __global__ void sddmm_kernel(
                       K_frag[0], K_frag[1], 
                       S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
         }
-        int bit_idx = 63 - laneid << 1;
+        int bit_idx = 63 - laneid*2;
         for(int i = 0; i < 4; i++){
-          uint64_t bit_mask = 1ULL << (bit_idx + i%2);
-          S_frag[i] = (TCblock_bit_map[tcb_id+i/2] & bit_mask) == 0 ? 0.0f : S_frag[i];
+          uint64_t bit_mask = 1ULL << (bit_idx - i%2);
+          S_frag[i] = (TCblock_bit_map[tcb_id*2+i/2] & bit_mask) == 0 ? 0.0f : S_frag[i];
         }
+
+        // if(bid ==0 && wid == 1 && tcb_id == 1){
+        //   printf("laneid: %d, Q_frag: %d %d %d %d\n", laneid, Q_frag[0], Q_frag[1], Q_frag[2], Q_frag[3]);
+        //   printf("laneid: %d, K_frag: %d %d\n", laneid, K_frag[0], K_frag[1]);
+        //   printf("laneid: %d, S_frag: %f %f %f %f\n", laneid, S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
+        // }
 
         int offset = tcb_id * BLK_M * BLK_N;
         for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
@@ -1586,7 +1606,7 @@ __global__ void sddmm_kernel(
         //get the max of D_frag among the threads in the warp
         // reduce_max(D_frag, sum_max);
         //TODO: store max to shared memory
-        __syncthreads();
+        // __syncthreads();
     }
     
 }
