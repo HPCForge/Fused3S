@@ -7,7 +7,8 @@ setup(
     ext_modules=[
         CUDAExtension('TCFMM', [
             'TCFMM.cpp',
-            'TCFMM_kernel.cu'
+            'TCFMM_kernel.cu',
+            'utils.cu'
         ],
         include_dirs=[include_path],
         extra_compile_args={
