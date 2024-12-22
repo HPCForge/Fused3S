@@ -3,10 +3,10 @@ import pandas as pd
 import torch
 import matplotlib.pyplot as plt
 import sys
-BLK_H = 8
+BLK_H = 16
 BLK_W = 8
 import DTCSpMM
-sys.path.append('/pub/zitongl5/FTC-MM/scripts/DTCSpMM')
+sys.path.append('/pub/zitongl5/DTC-SpMM_ASPLOS24/scripts/DTCSpMM')
 from dataset import *
 from plot_grid import *
 
@@ -25,11 +25,12 @@ def visualize_sparsity(sparse_matrix, title="Sparsity Pattern"):
 
 graph_reorder = ["citeseer.reorder", "cora.reorder", "YeastH.reorder", "OVCAR-8H.reorder", "Yeast.reorder", "DD.reorder", "soc-BlogCatalog.reorder", "web-BerkStan.reorder", "reddit.reorder", "ddi.reorder", "protein.reorder"]
 graph_og = ["citeseer", "cora", "YeastH", "OVCAR-8H", "Yeast", "DD", "soc-BlogCatalog", "web-BerkStan", "reddit", "ddi", "protein"]
+columns = ["graph", "num_rows", "num_nnz", "nnz_percentage", "block_count", "avg_nnz_per_block", "variance_nnz_per_block", "median_nnz_per_block", "first_quartile_nnz_per_block", "third_quartile_nnz_per_block", "avg_block_per_row_window", "variance_block_per_row_window", "median_block_per_row_window", "first_quartile_block_per_row_window", "third_quartile_block_per_row_window"]
 # graph_reorder = ["YeastH.reorder", "OVCAR-8H.reorder"]
 # graph_og = ["YeastH", "OVCAR-8H"]
 num_graph = len(graph_reorder)
-df_reorder = np.zeros([num_graph, 14])
-df_og = np.zeros([num_graph, 14])
+df_reorder = np.zeros([num_graph, len(columns)])
+df_og = np.zeros([num_graph, len(columns)])
 pg = PlotGrid(5, max(num_graph, 2))
 for graph_set in [graph_og, graph_reorder]:
   df = df_reorder if graph_set == graph_reorder else df_og
@@ -134,13 +135,13 @@ for graph_set in [graph_og, graph_reorder]:
   nnzPerBlock_pd.to_csv(title_prefix + "_" + str(BLK_H) + "x" + str(BLK_W) + "_nnzPerBlock_pd.csv")
 
 
-columns = ["graph", "num_rows", "num_nnz", "nnz_percentage", "block_count", "avg_nnz_per_block", "variance_nnz_per_block", "median_nnz_per_block", "first_quartile_nnz_per_block", "third_quartile_nnz_per_block", "avg_block_per_row_window", "variance_block_per_row_window", "median_block_per_row_window", "first_quartile_block_per_row_window", "third_quartile_block_per_row_window"]
-df_reorder = np.concatenate([np.array([graph_reorder]).T, df_reorder], axis=1)
-df_reorder = pd.DataFrame(df_reorder, columns=columns)
-df_reorder.to_csv(str(BLK_H) + "x" + str(BLK_W) + "_graph_stat_reorder.csv", index=False)
-df_og = np.concatenate([np.array([graph_og]).T, df_og], axis=1)
-df_og = pd.DataFrame(df_og, columns=columns)
-df_og.to_csv(str(BLK_H) + "x" + str(BLK_W) + "_graph_stat_og.csv", index=False)
-if plot_graph_stat:
-  pg.save("graph_stat.png")
+
+# df_reorder = np.concatenate([np.array([graph_reorder]).T, df_reorder], axis=1)
+# df_reorder = pd.DataFrame(df_reorder, columns=columns)
+# df_reorder.to_csv(str(BLK_H) + "x" + str(BLK_W) + "_graph_stat_reorder.csv", index=False)
+# df_og = np.concatenate([np.array([graph_og]).T, df_og], axis=1)
+# df_og = pd.DataFrame(df_og, columns=columns)
+# df_og.to_csv(str(BLK_H) + "x" + str(BLK_W) + "_graph_stat_og.csv", index=False)
+# if plot_graph_stat:
+#   pg.save("graph_stat.png")
 

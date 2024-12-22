@@ -112,7 +112,10 @@ def main():
   density = 0.2
   # whether to use new parallel strategy where each warp computes a tcb
   warp_tcb = True
+  use_1tb1rw = False
   apply_softmax = True
+  # for 1tb1rw and 1tbnrw, the number of warps per block
+  nWarpPerBlock = 20
   half_v_float_sddmm = []
   half_v_float_softmax = []
   half_v_float_final = []
@@ -188,12 +191,11 @@ def main():
     indices = torch.IntTensor(A_csr_h.indptr).cuda()
     RowWindowOffset, TCblockRowid,\
     TCblocktileId, TCblockoffset, SparseAToXindex,\
-    TCblockBitMap, block_count = TCFMM.preprocess_gpu(indptr, indices, size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
-
+    TBBoundaries, TCblockBitMap, block_count = TCFMM.preprocess_gpu(indptr, indices, size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
     start_time = time.time()
     for i in range(n_runs):
       if warp_tcb:
-        sddmm_result = TCFMM.f3S_sddmm(RowWindowOffset, TCblockRowid, SparseAToXindex, TCblockBitMap, size, Q_half, K_half)[0]
+        sddmm_result = TCFMM.f3S_sddmm(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, nWarpPerBlock, use_1tb1rw)[0]
         fusedR = None
       else:
         fusedR, sddmm_result = TCFMM.f3S_forward(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, apply_softmax, save_sddmm_result)
