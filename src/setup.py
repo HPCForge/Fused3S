@@ -1,7 +1,6 @@
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-include_path = '/pub/zitongl5/cccl/install/include'
 setup(
     name='TCFMM',
     ext_modules=[
@@ -10,7 +9,6 @@ setup(
             'TCFMM_kernel.cu',
             'utils.cu'
         ],
-        include_dirs=[include_path],
         extra_compile_args={
             'nvcc': [
             #   '-maxrregcount=32',
@@ -18,8 +16,7 @@ setup(
               '-O3',
               '-use_fast_math',
               '-ftz=true',
-              '-lineinfo',
-              '-I' + include_path]
+              '-lineinfo']
         }),
     ],
     cmdclass={

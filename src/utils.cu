@@ -65,6 +65,27 @@ void generate_tcblock_rowid_cuda(int *rowwindow_offset, int *tcblock_rowid,
   }
 }
 
+// assign row to thread block such that each thread block owns at least minTCBPerWarp*nWarpPerTB TCBs
+// also make sure each thread block own entire row windows and no straddling
+std::vector<int> assign_row_to_tb(int *rowwindow_offset, int nRowWindows){
+  // Each TB must have at least this many TCBs
+  int minTCB = MIN_TCBLOCK_PER_WARP * WARP_PER_TB;
+  std::vector<int> tb_boundaries;
+  tb_boundaries.push_back(0); // first TB starts at window
+  int currentTBStart = 0;
+  for (int i = 1; i <= nRowWindows; ++i) {
+    if (rowwindow_offset[i] - rowwindow_offset[currentTBStart] >= minTCB) {
+        tb_boundaries.push_back(i);
+        currentTBStart = i;
+    }
+  }
+  // If the last TB boundary is not at the end, add the end
+  if (tb_boundaries.back() != nRowWindows) {
+      tb_boundaries.push_back(nRowWindows);
+  }
+  return tb_boundaries;
+}
+
 /* Generate edge2column*/
 __device__ __forceinline__ int binarysearch(int *arr, int size, int target) {
   int left = 0;
