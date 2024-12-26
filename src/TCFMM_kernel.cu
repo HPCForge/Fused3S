@@ -145,29 +145,6 @@ __device__ void sum_partial_sum(float* sum, int tcb_id, int tid, int n_warps, co
   }
 }
 
-// __device__ void set_Q_frag(uint32_t* Q_frag, half2* Q_half2, int bid, int wid, int laneid, int numNodes, int embedding_dim){
-//    // Threads of a warp for fetching a 16X16 block of Q.
-//   // DOC: https://docs.nvidia.com/cuda/parallel-thread-execution/index.html?highlight=wmma#matrix-fragments-for-mma-m16n8k16-with-floating-point-type
-//   // Here I'm swapping columns of Q to make the memory access more coalesced. 
-//   // So when loading K, we have to swap the rows accordingly in order to get the same result.
-//   int rowIdx = bid * BLK_M + laneid/4;
-//   // /2 because half2. *2 because reading 2 consecutive half2. 
-//   int colIdx = wid * BLK_K/2 + (laneid%4) * 2;
-//   half2_uint32 h2U32Converter;
-//   if(rowIdx < numNodes){
-//     h2U32Converter.h2 = Q_half2[rowIdx * embedding_dim/2 + colIdx];
-//     Q_frag[0] = h2U32Converter.u32;
-//     h2U32Converter.h2 = Q_half2[rowIdx * embedding_dim/2 + colIdx + 1];
-//     Q_frag[2] = h2U32Converter.u32;
-//   }
-//   if(rowIdx + 8 < numNodes){
-//     h2U32Converter.h2 = Q_half2[(rowIdx+8) * embedding_dim/2 + colIdx];
-//     Q_frag[1] = h2U32Converter.u32;
-//     h2U32Converter.h2 = Q_half2[(rowIdx+8) * embedding_dim/2 + colIdx + 1];
-//     Q_frag[3] = h2U32Converter.u32;
-//   }
-// }
-
 __device__ void set_Q_frag_uint64(volatile uint32_t* Q_frag, uint64_t* Q, int bid, int wid, int laneid, int numNodes, int embedding_dim){
    // Threads of a warp for fetching a 16X16 block of Q.
   // DOC: https://docs.nvidia.com/cuda/parallel-thread-execution/index.html?highlight=wmma#matrix-fragments-for-mma-m16n8k16-with-floating-point-type
@@ -362,9 +339,10 @@ f3S_sddmm_cuda_1tb1rw(
   int nRowWindow = RowWindowOffset.size(0) - 1;
   int nTCBlock = SparseAToXidx.size(0)/BLK_N;
   torch::Tensor sddmmResult = torch::zeros({nTCBlock*BLK_M*BLK_N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));  
+  int shared_size = BLK_M * embeddingDim * sizeof(half);
   dim3 grid(nRowWindow, 1, 1);
   dim3 block(WARP_SIZE, nWarpPerBlock, 1);
-  sddmm_kernel_1tb1rw<<<grid, block>>>(
+  sddmm_kernel_1tb1rw<<<grid, block, shared_size>>>(
     RowWindowOffset.data_ptr<int>(), 
     TCblockRowid.data_ptr<int>(),
     SparseAToXidx.data_ptr<int>(),
@@ -451,14 +429,7 @@ __global__ void f3s_m16n8k16_cuda_kernel(
     dyn_shm[i] = 0.0f;
   }
  
-  // 2 16x8 blocks, each block is divided into 2 8x8 subblocks in row major order.
-  // __shared__ float sum[BLK_M * BLK_N * 2];
-  // for(int i = tid; i < BLK_M * BLK_N * 2; i += blockDim.x * blockDim.y){
-  //   sum[i] = 0.0f;
-  // }
   float* sum = dyn_shm + BLK_M*2;
-  // sddmm intermediate, 
-  // TODO: this can probably be disallocated during spmm phase
   float O_frag[8] = {0};// spmm result
   uint32_t Q_frag[4] = {0};
   set_Q_frag_uint64(Q_frag, reinterpret_cast<uint64_t*>(Q), bid, wid, laneid, numNodes, embedding_dim);
@@ -657,13 +628,47 @@ __global__ void f3s_m16n8k16_cuda_kernel(
   }
 }
 
-__device__ void load_Q_frag_uint64(volatile uint32_t *Q_frag, uint64_t *Q, int embedding_dim, int rowIdx, int colIdx) {
+__device__ void load_K_frag_permute_col(volatile uint32_t *K_frag, uint64_t *__restrict__ K, int embedding_dim, int rowIdx, int colIdx) {
+  uint64_t val = K[rowIdx + colIdx];
+  K_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
+  K_frag[1] = static_cast<uint32_t>(val >> 32);
+}
+
+// load Q from HBM to register. Permute columns
+__device__ void load_Q_frag_permute_col(volatile uint32_t *Q_frag, uint64_t *Q, int embedding_dim, int rowIdx, int colIdx) {
+    int laneid = threadIdx.x;//TODO: remove this
+    int wid = threadIdx.y; //TODO: remove this
     uint64_t val = Q[rowIdx * embedding_dim + colIdx];
     Q_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
     Q_frag[2] = static_cast<uint32_t>(val >> 32);
     val = Q[(rowIdx+8) * embedding_dim + colIdx];
     Q_frag[1] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
     Q_frag[3] = static_cast<uint32_t>(val >> 32);
+}
+
+// Assume Q is stored in row-major order.
+//dyn_shm stores Q in 8x16 blocks where each block is stored in row-major order and blocks are stored in row-major order.
+__device__ void load_Q_hbm2shm_128b(ulonglong2* __restrict__ Q_shm, ulonglong2* __restrict__ Q, int embedding_dim, int ind){
+  ulonglong2 val = Q[ind];
+  // /8 because ulonglong2 is 8 halfs
+  int colid = ind % (embedding_dim/8);
+  int block_colid = colid / 2;
+  int rowid = ind / (embedding_dim/8);
+  int block_offset = block_colid * BLK_M * 2 + rowid * 2 + colid % 2;
+  Q_shm[block_offset] = val;
+}
+
+// Pair with load_Q_hbm2shm_128b. 
+// This function has each warp read 1 16x16 block. 
+//Not following the register layout in ptx doc but reordering it to match how K is loaded.
+__device__ void load_Q_frag_shm(volatile uint32_t *Q_frag, uint64_t* __restrict__ dyn_shm, int ind, int laneid) {
+  int offset = ind * BLK_M * BLK_M/4 + laneid;
+  uint64_t val = dyn_shm[offset];
+  Q_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
+  Q_frag[2] = static_cast<uint32_t>(val >> 32);
+  val = dyn_shm[offset + 32];
+  Q_frag[1] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
+  Q_frag[3] = static_cast<uint32_t>(val >> 32);
 }
 
 // Each warp computes 1 tcb of S.
@@ -679,22 +684,35 @@ __global__ void sddmm_kernel_1tb1rw(
   volatile int laneid = threadIdx.x;
   int wid = threadIdx.y;
   volatile int tidInGroup = laneid % 4;
+  // contains a RW of Q
+  extern __shared__ uint32_t dyn_shm_1tb1rw[];
+  
+  for(int i = tid; i < BLK_M*embeddingDim/8; i += blockDim.x*blockDim.y){
+    load_Q_hbm2shm_128b(reinterpret_cast<ulonglong2*>(dyn_shm_1tb1rw), reinterpret_cast<ulonglong2*>(Q+bid*BLK_M*embeddingDim), embeddingDim, i);
+  }
+  __syncthreads();
+
   for(int tcb_id = wid + RowWindowOffset[bid]; tcb_id < RowWindowOffset[bid+1]; tcb_id += blockDim.y) {
       volatile float S_frag[4] = {0.0f};
       volatile uint32_t Q_frag[4];
       volatile uint32_t K_frag[2];
-      int rowIdx_Q = TCblockRowid[tcb_id]*BLK_M + laneid/4;
-      int rowIdx_K = SparseAToXidx[tcb_id*BLK_N + laneid/4] * embeddingDim/4; 
+      // int rowIdx_Q = TCblockRowid[tcb_id]*BLK_M + laneid/4;
+      volatile int rowIdx_K = SparseAToXidx[tcb_id*BLK_N + laneid/4] * embeddingDim/4;
       for(int i = 0; i < embeddingDim/BLK_K; i++) {
-          load_Q_frag_uint64(Q_frag, reinterpret_cast<uint64_t*>(Q), embeddingDim/4, rowIdx_Q, i*BLK_K/4 + tidInGroup);
-          //load K
-          uint64_t val = reinterpret_cast<uint64_t*>(K)[rowIdx_K + i*BLK_K/4 + tidInGroup];
-          K_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
-          K_frag[1] = static_cast<uint32_t>(val >> 32);
-          HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
-                    Q_frag[0], Q_frag[1], Q_frag[2], Q_frag[3], 
-                    K_frag[0], K_frag[1], 
-                    S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
+        // load_Q_frag_permute_col(Q_frag, reinterpret_cast<uint64_t*>(Q), embeddingDim/4, rowIdx_Q, i*BLK_K/4 + tidInGroup);
+        load_Q_frag_shm(Q_frag, reinterpret_cast<uint64_t*>(dyn_shm_1tb1rw), i, laneid);
+        //load K with permuted columns
+        uint64_t val = reinterpret_cast<uint64_t*>(K)[rowIdx_K + i*BLK_K/4 + tidInGroup];
+        K_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
+        K_frag[1] = static_cast<uint32_t>(val >> 32);
+        //load K unpermuted (will tank performance)
+        // int rowIdx_K = SparseAToXidx[tcb_id*BLK_N + laneid/4] * embeddingDim/2; 
+        // K_frag[0] = reinterpret_cast<uint32_t*>(K)[rowIdx_K + i*BLK_K/2 + tidInGroup];
+        // K_frag[1] = reinterpret_cast<uint32_t*>(K)[rowIdx_K + i*BLK_K/2 + BLK_N/2 + tidInGroup];
+        HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
+                  Q_frag[0], Q_frag[1], Q_frag[2], Q_frag[3], 
+                  K_frag[0], K_frag[1], 
+                  S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
       }
       int bit_idx = 63 - laneid*2;
       for(int i = 0; i < 4; i++){
@@ -744,8 +762,7 @@ __global__ void sddmm_kernel_1tbnrw(
         int rowIdx_Q = TCblockRowid[tcb_id]*BLK_M + laneid/4;
         int rowIdx_K = SparseAToXidx[tcb_id*BLK_N + laneid/4] * embeddingDim/4; 
         for(int i = 0; i < embeddingDim/BLK_K; i++) {
-            load_Q_frag_uint64(Q_frag, reinterpret_cast<uint64_t*>(Q), embeddingDim/4, rowIdx_Q, i*BLK_K/4 + tidInGroup);
-            //load K
+            load_Q_frag_permute_col(Q_frag, reinterpret_cast<uint64_t*>(Q), embeddingDim/4, rowIdx_Q, i*BLK_K/4 + tidInGroup);
             uint64_t val = reinterpret_cast<uint64_t*>(K)[rowIdx_K + i*BLK_K/4 + tidInGroup];
             K_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
             K_frag[1] = static_cast<uint32_t>(val >> 32);
