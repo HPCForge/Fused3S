@@ -107,15 +107,15 @@ def main():
   BLK_H = 16
   BLK_W = 8
   n_heads = 1
-  feature_size = 320
-  size = 1000
-  density = 0.2
+  feature_size = 100
+  size = 100
+  density = 0.1
   # whether to use new parallel strategy where each warp computes a tcb
   warp_tcb = True
-  use_1tb1rw = False
+  use_1tb1rw = True
   apply_softmax = True
   # for 1tb1rw and 1tbnrw, the number of warps per block
-  nWarpPerBlock = 20
+  nWarpPerBlock = 4
   half_v_float_sddmm = []
   half_v_float_softmax = []
   half_v_float_final = []
@@ -153,6 +153,11 @@ def main():
     K = F.pad(K, (0, col_padding_len, 0, row_padding_len), "constant", 0)
     V = F.pad(V, (0, col_padding_len, 0, row_padding_len), "constant", 0)
     Q_half = Q.to(torch.float16)
+    # for i in range(feature_size//8):
+    #   print(Q_half[:16, i*8:(i+1)*8])
+    # print("--------------------------------")
+    # for i in range(feature_size//8):
+    #   print(Q_half[16:32, i*8:(i+1)*8])
     print(f"Q_half.shape: {Q_half.shape}")
     K_half = K.to(torch.float16)
     print(f"K_half.shape: {K_half.shape}")
