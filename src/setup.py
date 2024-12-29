@@ -11,7 +11,7 @@ setup(
         ],
         extra_compile_args={
             'nvcc': [
-            #   '-maxrregcount=32',
+              '-maxrregcount=32',
             #   '-O2',
               '-O3',
               '-use_fast_math',

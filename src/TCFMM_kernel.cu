@@ -636,8 +636,6 @@ __device__ void load_K_frag_permute_col(volatile uint32_t *K_frag, uint64_t *__r
 
 // load Q from HBM to register. Permute columns
 __device__ void load_Q_frag_permute_col(volatile uint32_t *Q_frag, uint64_t *Q, int embedding_dim, int rowIdx, int colIdx) {
-    int laneid = threadIdx.x;//TODO: remove this
-    int wid = threadIdx.y; //TODO: remove this
     uint64_t val = Q[rowIdx * embedding_dim + colIdx];
     Q_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
     Q_frag[2] = static_cast<uint32_t>(val >> 32);
@@ -646,29 +644,63 @@ __device__ void load_Q_frag_permute_col(volatile uint32_t *Q_frag, uint64_t *Q, 
     Q_frag[3] = static_cast<uint32_t>(val >> 32);
 }
 
-// Assume Q is stored in row-major order.
-//dyn_shm stores Q in 8x16 blocks where each block is stored in row-major order and blocks are stored in row-major order.
-__device__ void load_Q_hbm2shm_128b(ulonglong2* __restrict__ Q_shm, ulonglong2* __restrict__ Q, int embedding_dim, int ind){
+// ind is in 128b interval
+// Assume Q is stored in row-major order. We divide Q into N 16x32 element block. 
+// we then put 
+//
+__device__ void load_Q_hbm2shm_128b(uint64_t* __restrict__ Q_shm, ulonglong2* __restrict__ Q, int embedding_dim, int ind){
+  int Q_width_64b = embedding_dim/4;
+  int Q_width_128b = embedding_dim/8;
   ulonglong2 val = Q[ind];
-  // /8 because ulonglong2 is 8 halfs
-  int colid = ind % (embedding_dim/8);
-  int block_colid = colid / 2;
-  int rowid = ind / (embedding_dim/8);
-  int block_offset = block_colid * BLK_M * 2 + rowid * 2 + colid % 2;
-  Q_shm[block_offset] = val;
+  ulonglong2 val2 = Q[ind + BLK_M/2 * Q_width_128b];
+  ind = ind * 2;
+  int rid = ind / Q_width_64b;
+  int cid = ind % Q_width_64b;
+  // 8 because 32*sizeof(half)/sizeof(uint64_t) = 8
+  int block_cid = cid / 8;
+  int cid_in_block = cid % 8;
+  int block_offset = block_cid*BLK_M*8 + rid*8 + cid_in_block;
+  Q_shm[block_offset] = val.x;
+  Q_shm[block_offset + 1] = val2.x;
+  Q_shm[block_offset + 64] = val.y;
+  Q_shm[block_offset + 65] = val2.y;
 }
 
 // Pair with load_Q_hbm2shm_128b. 
 // This function has each warp read 1 16x16 block. 
 //Not following the register layout in ptx doc but reordering it to match how K is loaded.
-__device__ void load_Q_frag_shm(volatile uint32_t *Q_frag, uint64_t* __restrict__ dyn_shm, int ind, int laneid) {
-  int offset = ind * BLK_M * BLK_M/4 + laneid;
-  uint64_t val = dyn_shm[offset];
-  Q_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
-  Q_frag[2] = static_cast<uint32_t>(val >> 32);
-  val = dyn_shm[offset + 32];
-  Q_frag[1] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
-  Q_frag[3] = static_cast<uint32_t>(val >> 32);
+__device__ void load_Q_frag_shm(uint64_t* Q_frag_uint64, uint64_t* __restrict__ dyn_shm, int ind, int laneid) {
+  // 64 because 8*32 * sizeof(half)/sizeof(uint64_t) = 64
+  // 4 because 16*sizeof(half)/sizeof(uint64_t) = 4
+  int offset = ind*BLK_M*4 + laneid*2;
+  Q_frag_uint64[0] = dyn_shm[offset];
+  Q_frag_uint64[1] = dyn_shm[offset + 1];
+}
+
+__device__ void print_Q_frag(uint64_t* Q_frag_uint64, int laneid) {
+  if(threadIdx.y == 0){
+    half2_uint32 h2U32Converter0;
+    half2_uint32 h2U32Converter1;
+    half2_uint32 h2U32Converter2;
+    half2_uint32 h2U32Converter3;
+    h2U32Converter0.u32 = static_cast<uint32_t>(Q_frag_uint64[0]& 0xFFFFFFFFull);
+    h2U32Converter1.u32 = static_cast<uint32_t>(Q_frag_uint64[0] >> 32);
+    h2U32Converter2.u32 = static_cast<uint32_t>(Q_frag_uint64[1]& 0xFFFFFFFFull);
+    h2U32Converter3.u32 = static_cast<uint32_t>(Q_frag_uint64[1] >> 32);
+    printf("laneid: %d, Q0: %f, Q1: %f, Q2: %f, Q3: %f, Q4: %f, Q5: %f, Q6: %f, Q7: %f\n", laneid, __half2float(h2U32Converter0.h2.x), __half2float(h2U32Converter0.h2.y), __half2float(h2U32Converter1.h2.x), __half2float(h2U32Converter1.h2.y), __half2float(h2U32Converter2.h2.x), __half2float(h2U32Converter2.h2.y), __half2float(h2U32Converter3.h2.x), __half2float(h2U32Converter3.h2.y));
+  }
+}
+
+__device__ void print_K_frag(ulonglong2 val, int laneid) {
+  half2_uint32 h2U32Converter0;
+  half2_uint32 h2U32Converter1;
+  half2_uint32 h2U32Converter2;
+  half2_uint32 h2U32Converter3;
+  h2U32Converter0.u32 = static_cast<uint32_t>(val.x & 0xFFFFFFFFull);
+  h2U32Converter1.u32 = static_cast<uint32_t>(val.x >> 32);
+  h2U32Converter2.u32 = static_cast<uint32_t>(val.y & 0xFFFFFFFFull);
+  h2U32Converter3.u32 = static_cast<uint32_t>(val.y >> 32);
+  printf("wid: %d, laneid: %d, K0: %f, K1: %f, K2: %f, K3: %f, K4: %f, K5: %f, K6: %f, K7: %f\n", threadIdx.y, laneid, __half2float(h2U32Converter0.h2.x), __half2float(h2U32Converter0.h2.y), __half2float(h2U32Converter1.h2.x), __half2float(h2U32Converter1.h2.y), __half2float(h2U32Converter2.h2.x), __half2float(h2U32Converter2.h2.y), __half2float(h2U32Converter3.h2.x), __half2float(h2U32Converter3.h2.y));
 }
 
 // Each warp computes 1 tcb of S.
@@ -683,59 +715,63 @@ __global__ void sddmm_kernel_1tb1rw(
     float2 *output) {
   volatile int laneid = threadIdx.x;
   int wid = threadIdx.y;
-  volatile int tidInGroup = laneid % 4;
   // contains a RW of Q
-  extern __shared__ uint32_t dyn_shm_1tb1rw[];
+  extern __shared__ uint64_t dyn_shm_1tb1rw[];
   
-  for(int i = tid; i < BLK_M*embeddingDim/8; i += blockDim.x*blockDim.y){
-    load_Q_hbm2shm_128b(reinterpret_cast<ulonglong2*>(dyn_shm_1tb1rw), reinterpret_cast<ulonglong2*>(Q+bid*BLK_M*embeddingDim), embeddingDim, i);
+  for(int i = tid; i < (BLK_M/2)*embeddingDim/8; i += blockDim.x*blockDim.y){
+    load_Q_hbm2shm_128b(dyn_shm_1tb1rw, reinterpret_cast<ulonglong2*>(Q+bid*BLK_M*embeddingDim), embeddingDim, i);
   }
   __syncthreads();
 
+  #pragma unroll 1
   for(int tcb_id = wid + RowWindowOffset[bid]; tcb_id < RowWindowOffset[bid+1]; tcb_id += blockDim.y) {
-      volatile float S_frag[4] = {0.0f};
-      volatile uint32_t Q_frag[4];
-      volatile uint32_t K_frag[2];
-      // int rowIdx_Q = TCblockRowid[tcb_id]*BLK_M + laneid/4;
-      volatile int rowIdx_K = SparseAToXidx[tcb_id*BLK_N + laneid/4] * embeddingDim/4;
-      for(int i = 0; i < embeddingDim/BLK_K; i++) {
-        // load_Q_frag_permute_col(Q_frag, reinterpret_cast<uint64_t*>(Q), embeddingDim/4, rowIdx_Q, i*BLK_K/4 + tidInGroup);
-        load_Q_frag_shm(Q_frag, reinterpret_cast<uint64_t*>(dyn_shm_1tb1rw), i, laneid);
-        //load K with permuted columns
-        uint64_t val = reinterpret_cast<uint64_t*>(K)[rowIdx_K + i*BLK_K/4 + tidInGroup];
-        K_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
-        K_frag[1] = static_cast<uint32_t>(val >> 32);
-        //load K unpermuted (will tank performance)
-        // int rowIdx_K = SparseAToXidx[tcb_id*BLK_N + laneid/4] * embeddingDim/2; 
-        // K_frag[0] = reinterpret_cast<uint32_t*>(K)[rowIdx_K + i*BLK_K/2 + tidInGroup];
-        // K_frag[1] = reinterpret_cast<uint32_t*>(K)[rowIdx_K + i*BLK_K/2 + BLK_N/2 + tidInGroup];
-        HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
-                  Q_frag[0], Q_frag[1], Q_frag[2], Q_frag[3], 
-                  K_frag[0], K_frag[1], 
-                  S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
-      }
-      int bit_idx = 63 - laneid*2;
-      for(int i = 0; i < 4; i++){
-        uint64_t bit_mask = 1ULL << (bit_idx - i%2);
-        S_frag[i] = (TCblockBitMap[tcb_id*2+i/2] & bit_mask) == 0 ? 0.0f : S_frag[i];
-      }
+    volatile float S_frag[4] = {0.0f};
+    int k_offset = SparseAToXidx[tcb_id*BLK_N + laneid/4] * embeddingDim/8 + laneid % 4;
+    for(int i = 0; i < embeddingDim/BLK_K; i+=2) {
+      //load K with permuted columns
+      ulonglong2 val = reinterpret_cast<ulonglong2*>(K)[k_offset + i*BLK_K/8];
+      uint64_t Q_frag_uint64[2];
+      load_Q_frag_shm(Q_frag_uint64, dyn_shm_1tb1rw, i, laneid);
+      HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
+                static_cast<uint32_t>(Q_frag_uint64[0] & 0xFFFFFFFFull), 
+                static_cast<uint32_t>(Q_frag_uint64[1] & 0xFFFFFFFFull), 
+                static_cast<uint32_t>(Q_frag_uint64[0] >> 32), 
+                static_cast<uint32_t>(Q_frag_uint64[1] >> 32), 
+                static_cast<uint32_t>(val.x & 0xFFFFFFFFull), 
+                static_cast<uint32_t>(val.x >> 32), 
+                S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
+      load_Q_frag_shm(Q_frag_uint64, dyn_shm_1tb1rw, i+1, laneid);
+      HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
+                static_cast<uint32_t>(Q_frag_uint64[0] & 0xFFFFFFFFull), 
+                static_cast<uint32_t>(Q_frag_uint64[1] & 0xFFFFFFFFull), 
+                static_cast<uint32_t>(Q_frag_uint64[0] >> 32), 
+                static_cast<uint32_t>(Q_frag_uint64[1] >> 32), 
+                static_cast<uint32_t>(val.y & 0xFFFFFFFFull), 
+                static_cast<uint32_t>(val.y >> 32), 
+                S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
+    }
+    int bit_idx = 63 - laneid*2;
+    for(int i = 0; i < 4; i++){
+      uint64_t bit_mask = 1ULL << (bit_idx - i%2);
+      S_frag[i] = (TCblockBitMap[tcb_id*2+i/2] & bit_mask) == 0 ? 0.0f : S_frag[i];
+    }
 
-      int offset = tcb_id * BLK_M * BLK_N;
-      for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
-        int sum_offset = j*BLK_N*BLK_N + laneid*2;
-        float2 val;
-        val.x = S_frag[j*2];
-        val.y = S_frag[j*2+1];
-        output[(offset + sum_offset)/2] = val;
-      }
+    int offset = tcb_id * BLK_M * BLK_N;
+    for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
+      int sum_offset = j*BLK_N*BLK_N + laneid*2;
+      float2 val;
+      val.x = S_frag[j*2];
+      val.y = S_frag[j*2+1];
+      output[(offset + sum_offset)/2] = val;
+    }
 
-      //get the sum of D_frag among the threads in the warp
-      // reduce_sum(D_frag, sum_max);
-      //TODO: store sum to shared memory
-      //get the max of D_frag among the threads in the warp
-      // reduce_max(D_frag, sum_max);
-      //TODO: store max to shared memory
-      // __syncthreads();
+    //get the sum of D_frag among the threads in the warp
+    // reduce_sum(D_frag, sum_max);
+    //TODO: store sum to shared memory
+    //get the max of D_frag among the threads in the warp
+    // reduce_max(D_frag, sum_max);
+    //TODO: store max to shared memory
+    // __syncthreads();
   }
 }
 
