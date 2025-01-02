@@ -97,41 +97,38 @@ preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
 //   bool use_f32_edge_attention,
 //   bool use_m8n32k16
 // );
-
-std::vector<torch::Tensor> 
-f3S_forward_cuda(
-  torch::Tensor row_window_offset,
-  torch::Tensor sparse_AToX_idx, 
-  torch::Tensor TCblock_bit_map,
-  int num_nodes, 
-  int embedding_dim,
-  torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
-  bool apply_softmax,
-  bool save_sddmm_result
-);
-
-std::vector<torch::Tensor> 
-f3S_sddmm_cuda_1tb1rw(
-  torch::Tensor RowWindowOffset,
-  torch::Tensor TCblockRowid,
-  torch::Tensor SparseAToXidx,
-  torch::Tensor TCblockBitMap,
-  int nNodes,
-  int embeddingDim,
-  torch::Tensor Q, torch::Tensor K,
-  int nWarpPerBlock);
-
 std::vector<torch::Tensor>
-f3S_sddmm_cuda_1tbnrw(
-  torch::Tensor RowWindowOffset,
-  torch::Tensor TBBoundaries,
-  torch::Tensor TCblockRowid,
-  torch::Tensor SparseAToXidx, 
-  torch::Tensor TCblockBitMap,
-  int nNodes, 
-  int embeddingDim,
-  torch::Tensor Q, torch::Tensor K,
-  int nWarpPerBlock);
+f3sCuda1tb1tcb(
+    torch::Tensor rowWindowOffset,
+    torch::Tensor sparseAToXidx, 
+    torch::Tensor tcbBitMap,
+    int numNodes, 
+    int embeddingDim,
+    torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
+    bool applySoftmax,
+    bool saveSddmmResult);
+
+std::vector<torch::Tensor> 
+f3sCuda1tb1rw(
+    torch::Tensor rowWindowOffset,
+    torch::Tensor sparseAToXidx,
+    torch::Tensor tcbBitMap,
+    int nNodes,
+    int embeddingDim,
+    torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+    int nWarpPerBlock);
+
+std::vector<torch::Tensor> 
+sddmmCuda1tbnrw(
+    torch::Tensor rowWindowOffset,
+    torch::Tensor tbBoundaries,
+    torch::Tensor tcbRowid,
+    torch::Tensor sparseAToXidx,
+    torch::Tensor tcbBitMap,
+    int nNodes,
+    int embeddingDim,
+    torch::Tensor Q, torch::Tensor K,
+    int nWarpPerBlock);
 
 // std::vector<torch::Tensor>
 // fusedMM_forward(torch::Tensor input, torch::Tensor TCblock_rowid,
@@ -173,81 +170,93 @@ f3S_sddmm_cuda_1tbnrw(
 // }
 
 std::vector<torch::Tensor>
-f3S_sddmm(
-  torch::Tensor RowWindowOffset,
-  torch::Tensor TBBoundaries,
-  torch::Tensor TCblockRowid,
-  torch::Tensor SparseAToXidx, 
-  torch::Tensor TCblockBitMap,
+f3s1tb1rw(
+  torch::Tensor rowWindowOffset,
+  torch::Tensor sparseAToXidx, 
+  torch::Tensor tcbBitMap,
   int nNodes, 
-  torch::Tensor Q, torch::Tensor K,
-  int nWarpPerBlock,
-  bool use_1tb1rw
+  torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+  int nWarpPerBlock
 ){
-  CHECK_INPUT(RowWindowOffset);
-  CHECK_INPUT(TBBoundaries);
-  CHECK_INPUT(TCblockRowid);
-  CHECK_INPUT(SparseAToXidx);
-  CHECK_INPUT(TCblockBitMap);
+  CHECK_INPUT(rowWindowOffset);
+  CHECK_INPUT(sparseAToXidx);
+  CHECK_INPUT(tcbBitMap);
   CHECK_INPUT(Q);
   CHECK_INPUT(K);
+  CHECK_INPUT(V);
   int embeddingDim = Q.size(1);
   std::vector<torch::Tensor> result;
-  if (use_1tb1rw) {
-    std::cout << "use_1tb1rw" << std::endl;
-    result = f3S_sddmm_cuda_1tb1rw(RowWindowOffset, 
-                                TCblockRowid, 
-                                SparseAToXidx, 
-                                TCblockBitMap, 
-                                nNodes, 
-                                embeddingDim,
-                                Q, K,
-                                nWarpPerBlock);
-  }
-  else{
-    std::cout << "use_1tbnrw" << std::endl;
-    result = f3S_sddmm_cuda_1tbnrw(RowWindowOffset, 
-                                TBBoundaries, 
-                                TCblockRowid, 
-                                SparseAToXidx, 
-                                TCblockBitMap, 
-                                nNodes, 
-                                embeddingDim,
-                                Q, K,
-                                nWarpPerBlock);
-  }
+  result = f3sCuda1tb1rw(rowWindowOffset, 
+                          sparseAToXidx, 
+                          tcbBitMap, 
+                          nNodes, 
+                          embeddingDim,
+                          Q, K, V,
+                          nWarpPerBlock);
   return result;
 }
 
 std::vector<torch::Tensor>
-f3S_forward(torch::Tensor row_window_offset,
-            torch::Tensor sparse_AToX_idx, 
-            torch::Tensor TCblock_bit_map,
-            int num_nodes, 
-            torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
-            bool apply_softmax,
-            bool save_sddmm_result) {
+sddmm1tbnrw(
+  torch::Tensor rowWindowOffset,
+  torch::Tensor tbBoundaries,
+  torch::Tensor tcbRowid,
+  torch::Tensor sparseAToXidx, 
+  torch::Tensor tcbBitMap,
+  int nNodes, 
+  torch::Tensor Q, torch::Tensor K,
+  int nWarpPerBlock
+){
+  CHECK_INPUT(rowWindowOffset);
+  CHECK_INPUT(tbBoundaries);
+  CHECK_INPUT(tcbRowid);
+  CHECK_INPUT(sparseAToXidx);
+  CHECK_INPUT(tcbBitMap);
+  CHECK_INPUT(Q);
+  CHECK_INPUT(K);
+  int embeddingDim = Q.size(1);
+  std::vector<torch::Tensor> result;
+  result = sddmmCuda1tbnrw(rowWindowOffset, 
+                           tbBoundaries, 
+                           tcbRowid, 
+                           sparseAToXidx, 
+                           tcbBitMap, 
+                           nNodes, 
+                           embeddingDim,
+                           Q, K,
+                           nWarpPerBlock);
+  return result;
+}
+
+std::vector<torch::Tensor>
+f3s1tb1tcb(torch::Tensor rowWindowOffset,
+          torch::Tensor sparseAToXidx, 
+          torch::Tensor tcbBitMap,
+          int nNodes, 
+          torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
+          bool applySoftmax,
+          bool saveSddmmResult) {
   CHECK_INPUT(Q);
   CHECK_INPUT(K);
   CHECK_INPUT(V);
-  CHECK_INPUT(row_window_offset);
-  CHECK_INPUT(sparse_AToX_idx);
-  CHECK_INPUT(TCblock_bit_map);
+  CHECK_INPUT(rowWindowOffset);
+  CHECK_INPUT(sparseAToXidx);
+  CHECK_INPUT(tcbBitMap);
   cudaEvent_t start, stop;
   float elapsedTime;
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  int embedding_dim = Q.size(1);
+  int embeddingDim = Q.size(1);
   cudaEventRecord(start, 0);
-  auto result = f3S_forward_cuda(row_window_offset, 
-                                 sparse_AToX_idx, 
-                                 TCblock_bit_map,
-                                 num_nodes, 
-                                 embedding_dim, 
-                                 Q, K, V, 
-                                 apply_softmax,
-                                 save_sddmm_result);
+  auto result = f3sCuda1tb1tcb(rowWindowOffset, 
+                               sparseAToXidx, 
+                               tcbBitMap,
+                               nNodes, 
+                               embeddingDim, 
+                               Q, K, V, 
+                               applySoftmax,
+                               saveSddmmResult);
   cudaEventRecord(stop, 0);
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&elapsedTime, start, stop);
@@ -260,6 +269,7 @@ f3S_forward(torch::Tensor row_window_offset,
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("preprocess_gpu", &preprocess_gpu, "Preprocess Step on (CUDA)");
   // m.def("fusedMM_forward", &fusedMM_forward, "FusedMM forward (CUDA)");
-  m.def("f3S_forward", &f3S_forward, "fused Spmm-Softmax-Spmm (CUDA)");
-  m.def("f3S_sddmm", &f3S_sddmm, "fused Spmm-Spmm (CUDA)");
+  m.def("f3s_1tb1tcb", &f3s1tb1tcb, "fused3S 1tb1tcb");
+  m.def("f3s_1tb1rw", &f3s1tb1rw, "fused3S 1tb1rw");
+  m.def("sddmm_1tbnrw", &sddmm1tbnrw, "sddmm 1tbnrw");
 }

@@ -107,16 +107,16 @@ def main():
   BLK_H = 16
   BLK_W = 8
   n_heads = 1
-  feature_size = 256
-  size = 1000
+  feature_size = 128
+  size = 100
   density = 0.1
   # whether to use new parallel strategy where each warp computes a tcb
-  warp_tcb = False
+  warp_tcb = True
   use_1tb1rw = True
   apply_softmax = True
   save_sddmm_result = True
   # for 1tb1rw and 1tbnrw, the number of warps per block
-  nWarpPerBlock = 8
+  nWarpPerBlock = 4
   half_v_float_sddmm = []
   half_v_float_softmax = []
   half_v_float_final = []
@@ -154,26 +154,12 @@ def main():
     K = F.pad(K, (0, col_padding_len, 0, row_padding_len), "constant", 0)
     V = F.pad(V, (0, col_padding_len, 0, row_padding_len), "constant", 0)
     Q_half = Q.to(torch.float16)
-    # torch.set_printoptions(precision=2)
-    # for i in range(feature_size//8):
-    #   print(Q_half[:16, i*8:(i+1)*8])
-    # print("--------------------------------")
-    # for i in range(feature_size//8):
-    #   print(Q_half[16:32, i*8:(i+1)*8])
     print(f"Q_half.shape: {Q_half.shape}")
     K_half = K.to(torch.float16)
-    # for i in range(feature_size//16):
-    #   print(K_half[:8, i*16:(i+1)*16].T)
-    # for i in range(feature_size//16):
-    #   print(K_half[8:16, i*16:(i+1)*16].T)
-    # print("--------------------------------")
-    # for i in range(feature_size//8):
-    #   print(K_half[16:32, i*8:(i+1)*8])
     print(f"K_half.shape: {K_half.shape}")
     V_half = V.to(torch.float16)
     print(f"V_half.shape: {V_half.shape}")
     K_half_cpu = K_half.to("cpu")
-    torch.set_printoptions(precision=3)
     
     sddmm_half_og_form = (Q_half @ K_half.T) * A_dense_half
     sddmm_og_form = (Q @ K.T) * A_dense
@@ -209,15 +195,34 @@ def main():
     start_time = time.time()
     for i in range(n_runs):
       if warp_tcb:
-        sddmm_result = TCFMM.f3S_sddmm(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, nWarpPerBlock, use_1tb1rw)[0]
-        fusedR = None
+        if use_1tb1rw:
+          fusedR, sddmm_result = TCFMM.f3s_1tb1rw(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, nWarpPerBlock)
+        else:
+          sddmm_result = TCFMM.sddmm_1tbnrw(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, nWarpPerBlock)[0]
+          fusedR = None
       else:
-        fusedR, sddmm_result = TCFMM.f3S_forward(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, apply_softmax, save_sddmm_result)
+        fusedR, sddmm_result = TCFMM.f3s_1tb1tcb(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, apply_softmax, save_sddmm_result)
     f3s_time = (time.time() - start_time)/n_runs
     print(f"f3s_time: {f3s_time}")
+    # Print full SDDMM result without truncation
+    torch.set_printoptions(precision=2, threshold=float('inf'))
+    # print(sddmm_result[-500:])
+    # print(sddmm_true[-500:])
     rel_err = torch.norm(sddmm_result - sddmm_true) / sddmm_true_norm
     f3s_v_true_fp32_sddmm.append(rel_err.item())
     if fusedR is not None:
+      # for i in range(4):
+      #   print(fusedR[:, i*8:(i+1)*8])
+      # print("--------------------------------")
+      # for i in range(4):
+      #   print(true[:, i*8:(i+1)*8])
+
+      diff = fusedR - true
+      max_diff = torch.max(torch.abs(diff))
+      max_idx = torch.argmax(torch.abs(diff))
+      row_idx = max_idx // diff.size(1)
+      col_idx = max_idx % diff.size(1)
+      print(f"Max absolute difference: {max_diff:.6f} at position ({row_idx}, {col_idx}), original value: {true[row_idx, col_idx]}, f3s value: {fusedR[row_idx, col_idx]}")
       rel_err = torch.norm(fusedR - true) / true_norm
       f3s_v_true_fp32_final.append(rel_err.item())
 

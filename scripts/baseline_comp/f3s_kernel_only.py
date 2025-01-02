@@ -17,7 +17,8 @@ def run_f3s(indptr, indices, num_nodes, num_edges, Q, K, V, BLK_H, BLK_W, n_warp
   block_count = TCFMM.preprocess_gpu(indices, indptr, num_nodes, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
   apply_softmax = True
   save_sddmm_result = True
-  sddmm_result_forward = TCFMM.f3S_forward(RowWindowOffset, SparseAToXindex, TCblockBitMap, num_nodes, Q, K, V, apply_softmax, save_sddmm_result)[1]
+  sddmm_result_1tb1tcb = TCFMM.f3s_1tb1tcb(RowWindowOffset, SparseAToXindex, TCblockBitMap, num_nodes, Q, K, V, apply_softmax, save_sddmm_result)[1]
+  sddmm_result_1tb1rw = TCFMM.f3s_1tb1rw(RowWindowOffset, SparseAToXindex, TCblockBitMap, num_nodes, Q, K, V, n_warp_per_block)[1]
   #last true/false is for use_1tb1rw, true is 1tb1rw
   sddmm_result_sddmm_1tb1rw = TCFMM.f3S_sddmm(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, num_nodes, Q, K, n_warp_per_block, True)[0]
   sddmm_result_sddmm_1tbnrw = TCFMM.f3S_sddmm(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, num_nodes, Q, K, n_warp_per_block, False)[0]
