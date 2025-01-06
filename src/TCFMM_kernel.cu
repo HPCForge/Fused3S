@@ -297,8 +297,8 @@ f3sCuda1tb1rw(
     int embeddingDim,
     torch::Tensor Q, torch::Tensor K, torch::Tensor V,
     int nWarpPerBlock){
-  int nTcb = sparseAToXidx.size(0)/BLK_N;
-  torch::Tensor sddmmResult = torch::zeros({nTcb*BLK_M*BLK_N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)); 
+  int nTcb = sparseAToXidx.size(0)/BLK_M;
+  torch::Tensor sddmmResult = torch::zeros({nTcb*BLK_M*BLK_M}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)); 
   int nRowWindow = rowWindowOffset.size(0) - 1;
   int paddedLength = nRowWindow * BLK_M; 
   auto output = torch::zeros({paddedLength, embeddingDim}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
@@ -324,6 +324,11 @@ f3sCuda1tb1rw(
     exit(-1);
   }
   cudaDeviceSynchronize();
+  error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    exit(-1);
+  }
   // remove padding
   output = output.index(
       {torch::indexing::Slice(0, nNodes), torch::indexing::Slice()});
@@ -595,12 +600,6 @@ __global__ void f3sKernel1tb1tcb(
   }
 }
 
-// __device__ void load_K_frag_permute_col(volatile uint32_t *K_frag, uint64_t *__restrict__ K, int embeddingDim, int rowIdx, int colIdx) {
-//   uint64_t val = K[rowIdx + colIdx];
-//   K_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
-//   K_frag[1] = static_cast<uint32_t>(val >> 32);
-// }
-
 // load Q from HBM to register. Permute columns
 __device__ void loadQFragPermuteCol(volatile uint32_t *Q_frag, uint64_t *Q, int embeddingDim, int rowIdx, int colIdx) {
     uint64_t val = Q[rowIdx * embeddingDim + colIdx];
@@ -656,14 +655,14 @@ __device__ void loadEFragShm(uint32_t* E_frag, uint32_t* dynShm) {
   E_frag[3] = dynShm[96];
 }
 
-__device__ void loadOFragShm(float* O_frag, float* dynShm, float* mTilde) {
+__device__ void loadOFragShm(volatile float* O_frag, float* dynShm, float* mTilde) {
   O_frag[0] = dynShm[0] * mTilde[0];
   O_frag[1] = dynShm[32] * mTilde[0];
   O_frag[2] = dynShm[64] * mTilde[BLK_M/2];
   O_frag[3] = dynShm[96] * mTilde[BLK_M/2];
 }
 
-__device__ void storeOFragShm(float* O_frag, float* dynShm) {
+__device__ void storeOFragShm(volatile float* O_frag, float* dynShm) {
   dynShm[0] = O_frag[0];
   dynShm[32] = O_frag[1];
   dynShm[64] = O_frag[2];
@@ -716,31 +715,35 @@ __global__ void f3sKernel1tb1rw(
   // r_b in Alg 1
   __shared__ float sumOld[BLK_M];
   __shared__ float mTilde[BLK_M];
-  {//initialize shared memory
-    int sharedSize = (embeddingDim + blockDim.y*BLK_N)*BLK_M/4 + (blockDim.y*2 + embeddingDim)*BLK_M/2;
-    for(int i = tid; i < sharedSize; i += blockDim.x*blockDim.y){
+  {
+    //initialize everything to 0
+    int oOffset = (embeddingDim+blockDim.y*BLK_N)*BLK_M/4 + 2*blockDim.y*BLK_M/2;
+    for(int i = tid; i < oOffset + embeddingDim*BLK_M/2; i += blockDim.x*blockDim.y){
       dynShm1tb1rw[i] = 0;
     }
     for(int i = tid; i < BLK_M; i += blockDim.x*blockDim.y){
       maxOld[i] = 0.0f;
       sumOld[i] = 0.0f;
+      mTilde[i] = 0.0f;
     }
   }
-  
   //BLK_M/2 because each thread loads 2 128b elements
   for(int i = tid; i < (BLK_M/2)*embeddingDim/8; i += blockDim.x*blockDim.y){
     loadQHbm2Shm128b(dynShm1tb1rw, Q+bid*BLK_M*embeddingDim/8, embeddingDim, i);
   }
   __syncthreads();
 
+  int niter = ((rowWindowOffset[bid+1] - rowWindowOffset[bid])*2 + blockDim.y - 1)/blockDim.y;
   #pragma unroll 1
-  // for(int tcbId = warpId + rowWindowOffset[bid]; tcbId < rowWindowOffset[bid+1]; tcbId += blockDim.y) {
-  for(int tcbStart = rowWindowOffset[bid]; tcbStart < rowWindowOffset[bid+1]; tcbStart += blockDim.y){
-    if(warpId + tcbStart < rowWindowOffset[bid+1]){
-      int warpTcbId = warpId + tcbStart;
-      float S_frag[4] = {0.0f};
+  for(int iter = 0; iter < niter; iter++){
+    int iterTcbStart = rowWindowOffset[bid] + iter*blockDim.y/2;
+    // number of 16x16 blocks in S/E being computed in this iteration.
+    int nBlock = min(blockDim.y/2, rowWindowOffset[bid+1]-iterTcbStart);
+    float S_frag[4] = {0.0f};
+    int warpTcbId = warpId/2 + iterTcbStart;
+    if(warpTcbId < rowWindowOffset[bid+1]){
       {//sddmm
-        int kOffset = sparseAToXidx[warpTcbId*BLK_N + laneId/4] * embeddingDim/8 + laneId % 4;
+        int kOffset = sparseAToXidx[warpTcbId*BLK_M + (warpId%2)*BLK_N + laneId/4] * embeddingDim/8 + laneId % 4;
         for(int i = 0; i < embeddingDim/BLK_K; i+=2) {
           //load K with permuted columns
           ulonglong2 val = K[kOffset + i*BLK_K/8];
@@ -767,26 +770,11 @@ __global__ void f3sKernel1tb1rw(
         int bitIdx = 63 - laneId*2;
         for(int i = 0; i < 4; i++){
           uint64_t bitMask = 1ULL << (bitIdx - i%2);
-          S_frag[i] = (tcbBitMap[warpTcbId*2+i/2] & bitMask) == 0 ? 0.0f : S_frag[i];
+          S_frag[i] = (tcbBitMap[warpTcbId*4+(warpId%2)*2+i/2] & bitMask) == 0 ? 0.0f : S_frag[i];
         }
-        // if(bid == 0 && warpId == 0){
-        //   printf("warpId: %d, laneId: %d, S: %f, %f, %f, %f\n", warpId, laneId, S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
-        // }
-        // __syncthreads();
-        // if(bid == 0 && warpId == 1){
-        //   printf("warpId: %d, laneId: %d, S: %f, %f, %f, %f\n", warpId, laneId, S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
-        // }
-        // __syncthreads();
-        // if(bid == 0 && warpId == 2){
-        //   printf("warpId: %d, laneId: %d, S: %f, %f, %f, %f\n", warpId, laneId, S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
-        // }
-        // __syncthreads();
-        // if(bid == 0 && warpId == 3){
-        //   printf("warpId: %d, laneId: %d, S: %f, %f, %f, %f\n", warpId, laneId, S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
-        // }
       }
       {//save sddmm result
-        int offset = warpTcbId * BLK_M * BLK_N + laneId*2;
+        int offset = warpTcbId*BLK_M*BLK_M + (warpId%2)*BLK_M*BLK_N + laneId*2;
         for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
           int sumOffset = j*BLK_N*BLK_N;
           float2 val;
@@ -796,90 +784,84 @@ __global__ void f3sKernel1tb1rw(
         }
       }
       {//online softmax
-        float* sumPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2 + laneId/4;
-        float* maxPtr = sumPtr + blockDim.y*BLK_M;
+        float* maxPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2 + laneId/4 + blockDim.y*BLK_M;
         //save max of each row within the warp to shared memory for cross-warp communication
         for(int i=0; i<2; i++){
           float localMax = fmaxf(S_frag[i*2], S_frag[i*2+1]);
           reduceMax(localMax, laneId);
           if(laneId % 4 == 0){
             maxPtr[warpId*BLK_M + i*BLK_M/2] = localMax;
-            // if(warpId == 0){
-            //   printf("laneId: %d, localMax: %f\n", laneId, localMax);
-            // }
           }
-        }
-        __syncthreads();
-        // if(warpId == 0){
-        //   printf("laneId: %d, ~~~ S_frag: %f, %f, %f, %f\n", laneId, S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
-        // }
-        // if(warpId == 0 && laneId == 0){
-        //   for(int i =0; i< blockDim.y; i++){
-        //     for(int j = 0; j < BLK_M; j++){
-        //       printf("maxPtr[%d][%d]: %f, ", i, j, maxPtr[i*BLK_M + j]);
-        //     }
-        //     printf("\n");
-        //   }
-        // }
-        for(int i=0; i<2; i++){
-          int offset = i*BLK_M/2 + laneId/4;
-          float newGlobalMax = maxOld[offset];
-          maxPtr += i*BLK_M/2;
-          for(int j=0; j<blockDim.y; j++){
-            newGlobalMax = fmaxf(maxPtr[j*BLK_M], newGlobalMax);
-          }
-          mTilde[offset] = __expf(maxOld[offset] - newGlobalMax);
-          //update old_max
-          maxOld[offset] = newGlobalMax;
-          //compute E and save to shared memory
-          S_frag[i*2] = __expf(S_frag[i*2] - newGlobalMax);
-          S_frag[i*2+1] = __expf(S_frag[i*2+1] - newGlobalMax);
-          //compute row sum and save to shared memory
-          float localSum = S_frag[i*2] + S_frag[i*2+1];
-          reduceSum(localSum);
-          sumPtr[warpId*BLK_M + i*BLK_M/2] = localSum;
-        }
-        // if(warpId == 0){
-        //   printf("laneId: %d, S_frag: %f, %f, %f, %f\n", laneId, S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
-        // }
-        int eOffset = (embeddingDim + warpId*BLK_N)*BLK_M/2+laneId;
-        storeEFragShm(S_frag, reinterpret_cast<uint32_t*>(dynShm1tb1rw)+eOffset);
-        __syncthreads();
-        //update r_b
-        for(int i = 0; i < 2; i++){
-          float rowSum = 0.0f;
-          for(int j=0; j<blockDim.y; j++){
-            rowSum += sumPtr[j*BLK_M + i*BLK_M/2];
-          }
-          int offset = i*BLK_M/2 + laneId/4;
-          sumOld[offset] *= mTilde[offset];
-          sumOld[offset] += rowSum;
         }
       }
     }
+    __syncthreads();
+    if(warpTcbId < rowWindowOffset[bid+1]){
+      float* maxPtr = reinterpret_cast<float*>(dynShm1tb1rw) 
+                      + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2 + laneId/4 + blockDim.y*BLK_M;
+      for(int i=0; i<2; i++){
+        int offset = i*BLK_M/2 + laneId/4;
+        float newGlobalMax = maxOld[offset];
+        maxPtr += i*BLK_M/2;
+        //we have blockDim.y columns reserved for local sum of each warp
+        //but only nBlock*2 are used
+        for(int j=0; j<nBlock*2; j++){
+          newGlobalMax = fmaxf(maxPtr[j*BLK_M], newGlobalMax);
+        }
+        if(warpId == 0){
+          mTilde[offset] = __expf(maxOld[offset] - newGlobalMax);
+          maxOld[offset] = newGlobalMax;
+        }
+        //compute E, ignore 0s
+        S_frag[i*2] = S_frag[i*2]==0.0f ? 0.0f : __expf(S_frag[i*2] - newGlobalMax);
+        S_frag[i*2+1] = S_frag[i*2+1]==0.0f ? 0.0f : __expf(S_frag[i*2+1] - newGlobalMax);
+        //compute row sum and save to shared memory
+        float localSum = S_frag[i*2] + S_frag[i*2+1];
+        reduceSum(localSum);
+        float* sumPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2 + laneId/4;
+        sumPtr[warpId*BLK_M + i*BLK_M/2] = localSum;
+      }
+      int eOffset = (embeddingDim + warpId*BLK_N)*BLK_M/2+laneId;
+      storeEFragShm(S_frag, reinterpret_cast<uint32_t*>(dynShm1tb1rw)+eOffset);
+    }
+    __syncthreads();
+    // warpTcbId < rowWindowOffset[bid+1] is always true for warp 0
+    if(warpId == 0){
+      float* sumPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2 + laneId/4;
+      //update r_b
+      for(int i = 0; i < 2; i++){
+        float rowSum = 0.0f;
+        //we have blockDim.y columns reserved for local sum of each warp
+        //but only nBlock*2 are used
+        for(int j=0; j<nBlock*2; j++){
+          rowSum += sumPtr[j*BLK_M + i*BLK_M/2];
+        }
+        int offset = i*BLK_M/2 + laneId/4;
+        sumOld[offset] *= mTilde[offset];
+        sumOld[offset] += rowSum;
+      }
+    }
+    __syncthreads();
     {//SpMM
-      int nTcb = min(blockDim.y, rowWindowOffset[bid+1] - tcbStart);
       int oOffset_base = (embeddingDim+blockDim.y*BLK_N)*BLK_M/2 + 2*blockDim.y*BLK_M + laneId;
       for(int i=warpId; i<embeddingDim/BLK_N; i+=blockDim.y){
-        //converting from torch::half to half
         int oOffset = oOffset_base + i*BLK_M*BLK_N;
-        float O_frag[4];
+        volatile float O_frag[4];
         loadOFragShm(O_frag, reinterpret_cast<float*>(dynShm1tb1rw)+oOffset, mTilde+laneId/4);
-        for(int j=0; j < nTcb; j+=2){
+        for(int j=0; j<nBlock; j++){
           uint32_t E_frag[4];
           uint32_t B_frag[2];
           //load E
-          int E_offset = (embeddingDim+j*BLK_N)*BLK_M/2 + laneId;
-          loadEFragShm(E_frag, reinterpret_cast<uint32_t*>(dynShm1tb1rw)+E_offset);
+          int eOffset = (embeddingDim+j*BLK_M)*BLK_M/2 + laneId;
+          loadEFragShm(E_frag, reinterpret_cast<uint32_t*>(dynShm1tb1rw)+eOffset);
           //load V
-          int tcbId = tcbStart + j;
-          int sparseAToXidxOffset = tcbId*BLK_N + (laneId%4)*2;
+          int sparseAToXidxOffset = (iterTcbStart+j)*BLK_M + (laneId%4)*2;
           for(int k = 0; k < 2; k++){
             sparseAToXidxOffset += k*BLK_N;
             Half2Uint32 h2U32Converter;
-            int offset = sparseAToXidx[sparseAToXidxOffset]* embeddingDim+ i*BLK_N + laneId/4;
+            int offset = sparseAToXidx[sparseAToXidxOffset]*embeddingDim+ i*BLK_N + laneId/4;
             h2U32Converter.h2.x = V[offset];
-            offset = sparseAToXidx[sparseAToXidxOffset + 1]* embeddingDim+ i*BLK_N + laneId/4;
+            offset = sparseAToXidx[sparseAToXidxOffset+1]*embeddingDim+ i*BLK_N + laneId/4;
             h2U32Converter.h2.y = V[offset];
             B_frag[k] = h2U32Converter.u32;
           }
@@ -887,51 +869,14 @@ __global__ void f3sKernel1tb1rw(
                     E_frag[0], E_frag[1], E_frag[2], E_frag[3], 
                     B_frag[0], B_frag[1], 
                     O_frag[0], O_frag[1], O_frag[2], O_frag[3]);
-          // if(i == 0 && j == 0){
-          //   Half2Uint32 h2U32Converter0;
-          //   Half2Uint32 h2U32Converter1;
-          //   Half2Uint32 h2U32Converter2;
-          //   Half2Uint32 h2U32Converter3;
-          //   h2U32Converter0.u32 = E_frag[0];
-          //   h2U32Converter1.u32 = E_frag[1]; 
-          //   h2U32Converter2.u32 = E_frag[2];
-          //   h2U32Converter3.u32 = E_frag[3];
-          //   Half2Uint32 h2U32Converter4;
-          //   Half2Uint32 h2U32Converter5;
-          //   h2U32Converter4.u32 = B_frag[0];
-          //   h2U32Converter5.u32 = B_frag[1];
-          //   // printf("laneId: %d, E_frag: %f, %f, %f, %f, %f, %f, %f, %f, B_frag: %f, %f, %f, %f O_frag: %f, %f, %f, %f\n", laneId, 
-          //   // //E_frag
-          //   // __half2float(h2U32Converter0.h2.x), __half2float(h2U32Converter0.h2.y),
-          //   // __half2float(h2U32Converter1.h2.x), __half2float(h2U32Converter1.h2.y), 
-          //   // __half2float(h2U32Converter2.h2.x), __half2float(h2U32Converter2.h2.y), 
-          //   // __half2float(h2U32Converter3.h2.x), __half2float(h2U32Converter3.h2.y), 
-          //   // //B_frag
-          //   // __half2float(h2U32Converter4.h2.x), __half2float(h2U32Converter4.h2.y), 
-          //   // __half2float(h2U32Converter5.h2.x), __half2float(h2U32Converter5.h2.y), 
-          //   // //O_frag
-          //   // O_frag[0], O_frag[1], O_frag[2], O_frag[3]);
-          //   printf("laneId: %d, B_frag: %f, %f, %f, %f O_frag: %f, %f, %f, %f\n", 
-          //   laneId, 
-          //   //B_frag
-          //   __half2float(h2U32Converter4.h2.x), __half2float(h2U32Converter4.h2.y), 
-          //   __half2float(h2U32Converter5.h2.x), __half2float(h2U32Converter5.h2.y), 
-          //   //O_frag
-          //   O_frag[0], O_frag[1], O_frag[2], O_frag[3]);
-          // }
         }
-        // printf("~~~~i: %d, laneId: %d, O_frag: %f, %f, %f, %f\n", i, laneId, O_frag[0], O_frag[1], O_frag[2], O_frag[3]);
         storeOFragShm(O_frag, reinterpret_cast<float*>(dynShm1tb1rw)+oOffset);
       }
     }
   }
   __syncthreads();
-
-  // move O from shared memory to global memory
-  // O is stored in special layout in shared memory and in row-major order in global memory
-
-  float invR0 = 1.0f/sumOld[laneId/4];
-  float invR1 = 1.0f/sumOld[BLK_M/2 + laneId/4];
+  float invR0 = sumOld[laneId/4] == 0.0f ? 0.0f : 1.0f/sumOld[laneId/4];
+  float invR1 = sumOld[BLK_M/2 + laneId/4] == 0.0f ? 0.0f : 1.0f/sumOld[BLK_M/2 + laneId/4];
   //points to (laneId)th element of O
   int oOffset = (embeddingDim+blockDim.y*BLK_N)*BLK_M/2 + 2*blockDim.y*BLK_M + laneId;
   //offset in terms of number of elements,
@@ -948,18 +893,6 @@ __global__ void f3sKernel1tb1rw(
     val.y = oPtr[96] * invR1;
     output[(outputOffset + i*BLK_N + BLK_M/2*embeddingDim)/2] = val;
   }
-  // if(laneId == 0 && bid == 0 && warpId == 0){
-  //   float* oPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim+blockDim.y*BLK_N)*BLK_M/2 + 2*blockDim.y*BLK_K;
-  //   for(int i = 0; i < BLK_M; i++){
-  //     for(int j = 0; j < embeddingDim/BLK_N; j++){
-  //       for(int k=0; k<BLK_N; k++){
-  //         printf("%f, ", oPtr[i*embeddingDim + j*BLK_N + k]);
-  //       }
-  //       printf("\n");
-  //     }
-  //     printf("\n");
-  //   }
-  // }
 }
 
 // Each tb computes multiple row windows of S

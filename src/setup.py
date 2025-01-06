@@ -17,6 +17,7 @@ setup(
               '-use_fast_math',
               '-ftz=true',
               '-lineinfo',
+              '-arch=sm_80',
             #   '-Xptxas', '-v',
               ]
         }),

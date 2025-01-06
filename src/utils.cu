@@ -15,12 +15,20 @@
 /// Preprocessing
 //////////////////////////////////////////////////////////////////////
 // assuming each tcblock can be divided into 8x8 (64 bits) sub-blocks
-// local_id is the id of the element in tcblock
+// sub_block is organized in column-major order
+// elements inside each sub-block is organized in row-major order
 __device__ void update_bitmap(uint64_t* bitmap, 
-                              int tcblock_id, int n_sub_blocks_per_tcblock, int local_id) {
+                              int tcblock_id, int n_sub_blocks_per_tcblock, 
+                              int blockSize_h, int blockSize_w,
+                              int row_local, int col_local) {
+  int n_sub_blocks_per_row = blockSize_w / 8;
+  int n_sub_blocks_per_col = blockSize_h / 8;
   unsigned long long int *ull_bitmap = reinterpret_cast<unsigned long long int*>(bitmap);
-  int sub_block_id = local_id / 64;
-  uint64_t mask = 1ULL << (63 - local_id % 64);
+  int sub_block_row_id = row_local / 8;
+  int sub_block_col_id = col_local / 8;
+  int sub_block_id = sub_block_col_id * n_sub_blocks_per_col + sub_block_row_id;
+  int sub_block_local_id = row_local % 8 * 8 + col_local % 8;
+  uint64_t mask = 1ULL << (63 - sub_block_local_id);
   atomicOr(&ull_bitmap[tcblock_id * n_sub_blocks_per_tcblock + sub_block_id], mask);
 }
 
@@ -207,7 +215,7 @@ __global__ void generate_tcoffset_id_atob(
     unsigned col_local = col % blockSize_w;
     tileid[tcblock_offset_ptr[tcblock_id] + pos_ptr[tcblock_id]] =
         (uint8_t)(row_local * blockSize_w + col_local);
-    update_bitmap(tcblock_bit_map, block_start + tcblock_id, n_sub_blocks_per_tcblock, int(row_local * blockSize_w + col_local));
+    update_bitmap(tcblock_bit_map, block_start + tcblock_id, n_sub_blocks_per_tcblock, blockSize_w, blockSize_h, row_local, col_local);
     sparse_AToB[tcblock_id * blockSize_w + col_local] = edgeList[e_index];
     pos_ptr[tcblock_id]++;
   }
@@ -300,7 +308,7 @@ seg_sort_dequ(int *seg, int *edgeLists, int *nodepointer, int *edgetocol,
   auto tcblock_offset_tensor = torch::zeros({block_counter + 1}, options_gpu);
   auto sparse_AToX_index_tensor =
       torch::zeros({block_counter * blockSize_w}, options_gpu);
-  int bit_map_size = BLK_M * BLK_N;
+  int bit_map_size = blockSize_h * blockSize_w;
   assert(bit_map_size % 64 == 0);
   int bit_map_int64_size = bit_map_size / 64;
   auto tcblock_bit_map_tensor = torch::zeros({block_counter*bit_map_int64_size}, options_gpu_uint64);

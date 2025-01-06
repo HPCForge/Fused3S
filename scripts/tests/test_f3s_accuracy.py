@@ -18,22 +18,22 @@ def convert_row_major_nz_to_block_row_major(A, BLK_H, BLK_W):
       nnz = torch.cat((nnz, block))
   return nnz
 
-# I have a matrix as a pytorch tensor. this fucntion does the following:
-# 1. divided it into row blocks of height BLK_M. If the last row block is not full, pad it with zeros.
+# mat is a 2D pytorch tensor. this fucntion does the following:
+# 1. divided it into row blocks of height BLK_H. If the last row block is not full, pad it with zeros.
 # 2. Inside each row block, remove all the columns that are all 0s.
-# 3. Inside each row block, group the remaining columns into groups of BLK_N. This should result in submatrices of size BLK_M x BLK_N
+# 3. Inside each row block, group the remaining columns into groups of BLK_W. This should result in submatrices of size BLK_H x BLK_W
 # 4. Go through these submatrices in each row block. for each submatrices, write their values into R in row-major order.
 # 5. return R
-def process_matrix(mat, BLK_M, BLK_N):
+def process_matrix(mat, BLK_H, BLK_W, use_1w1tcb):
     M, K = mat.shape
-    num_blocks = (M + BLK_M - 1) // BLK_M  # Ceiling division to get the number of row blocks
+    num_blocks = (M + BLK_H - 1) // BLK_H  # Ceiling division to get the number of row blocks
 
     submatrices_list = []
 
     for i in range(num_blocks):
-        # Step 1: Divide into row blocks of height BLK_M
-        block_start_row = i * BLK_M
-        block_end_row = min((i + 1) * BLK_M, M)
+        # Step 1: Divide into row blocks of height BLK_H
+        block_start_row = i * BLK_H
+        block_end_row = min((i + 1) * BLK_H, M)
         block_rows = mat[block_start_row:block_end_row, :]
         block_height = block_rows.shape[0]
 
@@ -41,10 +41,14 @@ def process_matrix(mat, BLK_M, BLK_N):
         non_zero_columns = (block_rows != 0).any(dim=0)
         block_rows = block_rows[:, non_zero_columns]
 
-        # Step 3: Group remaining columns into groups of BLK_N
+        # Step 3: Group remaining columns into groups of BLK_W
         num_columns_remaining = block_rows.shape[1]
-        num_submatrices_in_block = (num_columns_remaining + BLK_N - 1) // BLK_N  # Ceiling division
-        padded_num_columns = num_submatrices_in_block * BLK_N
+        num_tcb_in_rw = (num_columns_remaining + BLK_W - 1) // BLK_W  # Ceiling division
+        if use_1w1tcb:
+          # Round up to nearest even number 
+          # this is because in 1tb1rw we need 16x16 blocks in SDDMM result for SpMM
+          num_tcb_in_rw = (num_tcb_in_rw + 1) // 2 * 2
+        padded_num_columns = num_tcb_in_rw * BLK_W
         pad_columns = padded_num_columns - num_columns_remaining
 
         # Pad columns with zeros if necessary
@@ -52,20 +56,20 @@ def process_matrix(mat, BLK_M, BLK_N):
             padding = torch.zeros((block_rows.shape[0], pad_columns), dtype=block_rows.dtype, device=block_rows.device)
             block_rows = torch.cat([block_rows, padding], dim=1)
 
-        # Pad rows with zeros if necessary to ensure each block has BLK_M rows
-        if block_height < BLK_M:
-            pad_rows = BLK_M - block_height
+        # Pad rows with zeros if necessary to ensure each block has BLK_H rows
+        if block_height < BLK_H:
+            pad_rows = BLK_H - block_height
             padding = torch.zeros((pad_rows, block_rows.shape[1]), dtype=block_rows.dtype, device=block_rows.device)
             block_rows = torch.cat([block_rows, padding], dim=0)
 
-        # Reshape and permute to get submatrices of size BLK_M x BLK_N
-        block_rows = block_rows.view(BLK_M, num_submatrices_in_block, BLK_N)
-        block_submatrices = block_rows.permute(1, 0, 2)  # Shape: (num_submatrices_in_block, BLK_M, BLK_N)
+        # Reshape and permute to get submatrices of size BLK_H x BLK_W
+        block_rows = block_rows.view(BLK_H, num_tcb_in_rw, BLK_W)
+        block_submatrices = block_rows.permute(1, 0, 2)  # Shape: (num_tcb_in_rw, BLK_H, BLK_W)
 
         submatrices_list.append(block_submatrices.flatten())
 
     # Step 4: Concatenate all submatrices into R
-    R = torch.cat(submatrices_list, dim=0)  # Shape: (N, BLK_M, BLK_N)
+    R = torch.cat(submatrices_list, dim=0)  # Shape: (N, BLK_H, BLK_W)
 
     return R
 
@@ -107,16 +111,18 @@ def main():
   BLK_H = 16
   BLK_W = 8
   n_heads = 1
-  feature_size = 128
-  size = 100
+  embedding_size = 32
+  size = 10000
   density = 0.1
   # whether to use new parallel strategy where each warp computes a tcb
-  warp_tcb = True
+  use_1w1tcb = True
   use_1tb1rw = True
+  if use_1w1tcb and use_1tb1rw:
+     BLK_W = 16
   apply_softmax = True
   save_sddmm_result = True
   # for 1tb1rw and 1tbnrw, the number of warps per block
-  nWarpPerBlock = 4
+  nWarpPerBlock = 8
   half_v_float_sddmm = []
   half_v_float_softmax = []
   half_v_float_final = []
@@ -128,8 +134,6 @@ def main():
   for n in range(n_test):
     np.random.seed(n)
     torch.manual_seed(n)
-
-    print(f"----------{n}-----------")
  
     A_csr_h = sp.sparse.random(size, size, density=density, format='csr', data_rvs=np.random.rand)
     # A_csr_h = (A_csr_h + A_csr_h.T) / 2
@@ -142,12 +146,12 @@ def main():
     A_dense_half = A_dense.to(torch.float16)
 
     # generate the dense feature matrix
-    Q = torch.rand(size, feature_size, dtype=torch.float32, device='cuda')
-    K = torch.rand(size, feature_size, dtype=torch.float32, device='cuda')
-    V = torch.rand(size, feature_size, dtype=torch.float32, device='cuda')
+    Q = torch.rand(size, embedding_size, dtype=torch.float32, device='cuda')
+    K = torch.rand(size, embedding_size, dtype=torch.float32, device='cuda')
+    V = torch.rand(size, embedding_size, dtype=torch.float32, device='cuda')
     # pad the feature matrix to have a multiple of 16 columns
-    # if feature_size % BLK_H != 0:
-    col_padding_len = 0 if feature_size % BLK_H == 0 else BLK_H - feature_size % BLK_H
+    # if embedding_size % BLK_H != 0:
+    col_padding_len = 0 if embedding_size % BLK_H == 0 else BLK_H - embedding_size % BLK_H
     # row_padding_len = 0 if size % BLK_H == 0 else BLK_H - size % BLK_H
     row_padding_len = 0
     Q = F.pad(Q, (0, col_padding_len, 0, row_padding_len), "constant", 0)
@@ -163,8 +167,11 @@ def main():
     
     sddmm_half_og_form = (Q_half @ K_half.T) * A_dense_half
     sddmm_og_form = (Q @ K.T) * A_dense
-    sddmm_true_half = process_matrix(sddmm_half_og_form, BLK_H, BLK_W)
-    sddmm_true = process_matrix(sddmm_og_form, BLK_H, BLK_W)
+    # BLK_M = 16, BLK_N = 8, but BLK_H = 16, BLK_W = 16
+    # I'm detaching the size of the output block from the mma block size.
+    # This is to deal with odd number of TCBs.
+    sddmm_true_half = process_matrix(sddmm_half_og_form, 16, 8, use_1w1tcb)
+    sddmm_true = process_matrix(sddmm_og_form, 16, 8, use_1w1tcb)
     sddmm_true_norm = torch.norm(sddmm_true)
     rel_err = torch.norm(sddmm_true - sddmm_true_half)/sddmm_true_norm
     half_v_float_sddmm.append(rel_err.item())
@@ -194,7 +201,7 @@ def main():
     TBBoundaries, TCblockBitMap, block_count = TCFMM.preprocess_gpu(indptr, indices, size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
     start_time = time.time()
     for i in range(n_runs):
-      if warp_tcb:
+      if use_1w1tcb:
         if use_1tb1rw:
           fusedR, sddmm_result = TCFMM.f3s_1tb1rw(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, nWarpPerBlock)
         else:
@@ -206,16 +213,16 @@ def main():
     print(f"f3s_time: {f3s_time}")
     # Print full SDDMM result without truncation
     torch.set_printoptions(precision=2, threshold=float('inf'))
-    # print(sddmm_result[-500:])
-    # print(sddmm_true[-500:])
     rel_err = torch.norm(sddmm_result - sddmm_true) / sddmm_true_norm
     f3s_v_true_fp32_sddmm.append(rel_err.item())
     if fusedR is not None:
-      # for i in range(4):
-      #   print(fusedR[:, i*8:(i+1)*8])
+      print(fusedR.shape)
+      print(true.shape)
+      # for i in range(embedding_size//16):
+      #   print(fusedR[:, i*16:(i+1)*16])
       # print("--------------------------------")
-      # for i in range(4):
-      #   print(true[:, i*8:(i+1)*8])
+      # for i in range(embedding_size//16):
+      #   print(true[:, i*16:(i+1)*16])
 
       diff = fusedR - true
       max_diff = torch.max(torch.abs(diff))
