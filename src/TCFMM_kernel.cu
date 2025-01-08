@@ -773,16 +773,16 @@ __global__ void f3sKernel1tb1rw(
           S_frag[i] = (tcbBitMap[warpTcbId*4+(warpId%2)*2+i/2] & bitMask) == 0 ? 0.0f : S_frag[i];
         }
       }
-      {//save sddmm result
-        int offset = warpTcbId*BLK_M*BLK_M + (warpId%2)*BLK_M*BLK_N + laneId*2;
-        for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
-          int sumOffset = j*BLK_N*BLK_N;
-          float2 val;
-          val.x = S_frag[j*2];
-          val.y = S_frag[j*2+1];
-          sddmmResult[(offset + sumOffset)/2] = val;
-        }
-      }
+      // {//save sddmm result
+      //   int offset = warpTcbId*BLK_M*BLK_M + (warpId%2)*BLK_M*BLK_N + laneId*2;
+      //   for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
+      //     int sumOffset = j*BLK_N*BLK_N;
+      //     float2 val;
+      //     val.x = S_frag[j*2];
+      //     val.y = S_frag[j*2+1];
+      //     sddmmResult[(offset + sumOffset)/2] = val;
+      //   }
+      // }
       {//online softmax
         float* maxPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2 + laneId/4 + blockDim.y*BLK_M;
         //save max of each row within the warp to shared memory for cross-warp communication
