@@ -4,6 +4,24 @@ from DFGNN.layers.util import preprocess_softmax, preprocess_CSR
 from DFGNN.operators.fused_gtconv import GTConvFuse_inference_softmax, GTConvFuse_inference_csr, GTConvFuse_inference_hyper
 from dgl.data import (CoraGraphDataset, CiteseerGraphDataset, PubmedGraphDataset)
 import argparse
+import TCFMM
+
+def run_f3s_1tb1rw(indptr, indices, num_nodes, num_edges, Q, K, V, n_warp_per_block):
+  BLK_H = 16
+  BLK_W = 16
+  # Set up tensors for preprocessing
+  num_row_windows = (num_nodes + BLK_H - 1) // BLK_H
+  # Move tensors to GPU
+  blockPartition_cuda = torch.zeros(num_row_windows, dtype=torch.int).cuda()
+  edgeToColumn_cuda = torch.zeros(num_edges, dtype=torch.int).cuda()
+  edgeToRow_cuda = torch.zeros(num_edges, dtype=torch.int).cuda()
+  RowWindowOffset, TCblockRowid, TCblocktileId,\
+  TCblockoffset, SparseAToXindex, TBBoundaries, TCblockBitMap,\
+  block_count = TCFMM.preprocess_gpu(indices, indptr, num_nodes, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
+  print("preprocess done")
+  result_1tb1rw, sddmm_result = TCFMM.f3s_1tb1rw(RowWindowOffset, SparseAToXindex, TCblockBitMap, num_nodes, Q, K, V, n_warp_per_block)
+  torch.cuda.synchronize()
+  return result_1tb1rw
 
 def main(args):
   num_heads = 1
@@ -39,7 +57,18 @@ def main(args):
   else:
     raise ValueError(f"Invalid format: {args.format}")
   torch.cuda.synchronize()
+  # get rid of head dimension
+  out = out.view(num_nodes, args.embedding_dim)
   print(out.shape)
+
+  n_warp_per_block = 8
+  Q_half = Q.view(num_nodes, args.embedding_dim).half()
+  K_half = K.view(num_nodes, args.embedding_dim).half()
+  V_half = V.view(num_nodes, args.embedding_dim).half()
+  result_1tb1rw = run_f3s_1tb1rw(indptr, indices, num_nodes, num_edges, Q_half, K_half, V_half, n_warp_per_block)
+  print(result_1tb1rw.shape)
+  rel_error = torch.norm(out - result_1tb1rw)/torch.norm(out)
+  print(f"relative error: {rel_error}")
 
 
 

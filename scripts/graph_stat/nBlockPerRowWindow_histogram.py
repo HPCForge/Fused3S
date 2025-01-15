@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 # Read the CSV file
 df = pd.read_csv('OG_16x8_nBlockPerRowWindow_pd.csv')
-df = df.iloc[:, 1:]  # Remove first column (index)
+df = df.iloc[:, -4:]  # Remove first column (index)
 
 # Calculate number of rows and columns for subplots
 n_graphs = len(df.columns)
@@ -12,7 +12,7 @@ n_rows = int(np.ceil(n_graphs / 2))
 n_cols = 2
 
 # Create figure
-fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 25))
+fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 15))
 axes = axes.flatten()  # Flatten axes array for easier indexing
 
 # For each graph (column)
@@ -66,6 +66,6 @@ fig.text(0.5, 0.05,
 # Adjust layout to make room for caption
 
 plt.tight_layout()
-plt.subplots_adjust(bottom=0.1)
+plt.subplots_adjust(bottom=0.15)
 plt.savefig('OG_16x8_nBlockPerRowWindow_histogram.png')
 plt.close() 

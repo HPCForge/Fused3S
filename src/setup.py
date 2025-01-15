@@ -11,14 +11,15 @@ setup(
         ],
         extra_compile_args={
             'nvcc': [
-            #   '-maxrregcount=32',
+            #   '-maxrregcount=64',
             #   '-O2',
               '-O3',
-              '-use_fast_math',
+              # '-use_fast_math',
+              # '-prec-div=true',
               '-ftz=true',
               '-lineinfo',
               '-arch=sm_80',
-            #   '-Xptxas', '-v',
+              # '-Xptxas', '-v',
               ]
         }),
     ],

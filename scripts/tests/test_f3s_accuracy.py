@@ -4,7 +4,7 @@ import torch
 import TCFMM
 import time
 import torch.nn.functional as F
-
+import argparse
 def convert_row_major_nz_to_block_row_major(A, BLK_H, BLK_W):
   nnz = torch.empty(0, dtype= A.dtype, device=A.device)
   n_block_per_row = (A.shape[1] + BLK_W - 1) // BLK_W
@@ -98,37 +98,34 @@ def row_wise_softmax_mask(matrix, A):
     masked_matrix = torch.where(mask, matrix, neg_inf)
     row_max, _ = torch.max(masked_matrix, dim=1, keepdim=True)
     shifted_matrix = torch.where(mask, matrix - row_max, neg_inf)
-    exp_matrix = torch.exp(shifted_matrix) * mask.to(matrix.dtype)
+    exp_matrix = torch.exp(shifted_matrix)
     row_sum = exp_matrix.sum(dim=1, keepdim=True)
     # Prevent division by zero if a row is entirely masked
     row_sum = torch.where(row_sum == 0, one_val, row_sum)
     softmax_matrix = exp_matrix / row_sum
     return softmax_matrix
 
-def main():
+def main(args):
   n_runs = 1
   n_test = 1
   BLK_H = 16
   BLK_W = 8
-  n_heads = 1
-  embedding_size = 32
-  size = 10000
-  density = 0.1
   # whether to use new parallel strategy where each warp computes a tcb
-  use_1w1tcb = True
   use_1tb1rw = True
+  use_1w1tcb = not args.use_1tb1tcb
+  apply_softmax = not args.skip_softmax
+  embedding_size = args.embedding_size
+  size = args.size
+  density = args.density
   if use_1w1tcb and use_1tb1rw:
      BLK_W = 16
-  apply_softmax = True
   save_sddmm_result = True
   # for 1tb1rw and 1tbnrw, the number of warps per block
   nWarpPerBlock = 8
   half_v_float_sddmm = []
-  half_v_float_softmax = []
   half_v_float_final = []
   f3s_v_true_fp32_sddmm = []
   f3s_v_true_fp32_final = []
-  fusedRs = []
   # np.random.seed(26)
   # torch.manual_seed(26)
   for n in range(n_test):
@@ -136,9 +133,6 @@ def main():
     torch.manual_seed(n)
  
     A_csr_h = sp.sparse.random(size, size, density=density, format='csr', data_rvs=np.random.rand)
-    # A_csr_h = (A_csr_h + A_csr_h.T) / 2
-    padded_size = ((size + BLK_H - 1) // BLK_H) * BLK_H
-    A_csr_h_padded = pad_csr_matrix(A_csr_h, padded_size, padded_size)
 
     # Round and convert all non-zero entries to 1
     A_csr_h.data = np.ceil(A_csr_h.data, dtype=np.float32)
@@ -203,11 +197,14 @@ def main():
     for i in range(n_runs):
       if use_1w1tcb:
         if use_1tb1rw:
-          fusedR, sddmm_result = TCFMM.f3s_1tb1rw(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, nWarpPerBlock)
+          print("using 1tb1rw")
+          fusedR, sddmm_result = TCFMM.f3s_1tb1rw(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, nWarpPerBlock, apply_softmax)
         else:
+          print("using 1tbnrw")
           sddmm_result = TCFMM.sddmm_1tbnrw(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, nWarpPerBlock)[0]
           fusedR = None
       else:
+        print("using 1tb1tcb")
         fusedR, sddmm_result = TCFMM.f3s_1tb1tcb(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, apply_softmax, save_sddmm_result)
     f3s_time = (time.time() - start_time)/n_runs
     print(f"f3s_time: {f3s_time}")
@@ -218,11 +215,11 @@ def main():
     if fusedR is not None:
       print(fusedR.shape)
       print(true.shape)
-      # for i in range(embedding_size//16):
-      #   print(fusedR[:, i*16:(i+1)*16])
+      # for i in range(4):
+      #   print(fusedR[:, i*8:(i+1)*8])
       # print("--------------------------------")
-      # for i in range(embedding_size//16):
-      #   print(true[:, i*16:(i+1)*16])
+      # for i in range(4):
+      #   print(true[:, i*8:(i+1)*8])
 
       diff = fusedR - true
       max_diff = torch.max(torch.abs(diff))
@@ -248,5 +245,13 @@ def main():
 
 
 if __name__ == "__main__":
-  main()
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--embedding_size", '-emb', type=int, default=320)
+  parser.add_argument("--size", '-s', type=int, default=1000)
+  parser.add_argument("--density", '-d', type=float, default=0.1)
+  parser.add_argument("--skip_softmax", action='store_true')
+  parser.add_argument("--use_1tb1tcb", '-1tb1tcb', action='store_true')
+  args = parser.parse_args()
+  main(args)
+
 

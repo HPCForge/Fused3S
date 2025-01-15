@@ -116,7 +116,8 @@ f3sCuda1tb1rw(
     int nNodes,
     int embeddingDim,
     torch::Tensor Q, torch::Tensor K, torch::Tensor V,
-    int nWarpPerBlock);
+    int nWarpPerBlock,
+    bool applySoftmax);
 
 std::vector<torch::Tensor> 
 sddmmCuda1tbnrw(
@@ -176,7 +177,8 @@ f3s1tb1rw(
   torch::Tensor tcbBitMap,
   int nNodes, 
   torch::Tensor Q, torch::Tensor K, torch::Tensor V,
-  int nWarpPerBlock
+  int nWarpPerBlock,
+  bool applySoftmax
 ){
   CHECK_INPUT(rowWindowOffset);
   CHECK_INPUT(sparseAToXidx);
@@ -192,7 +194,8 @@ f3s1tb1rw(
                           nNodes, 
                           embeddingDim,
                           Q, K, V,
-                          nWarpPerBlock);
+                          nWarpPerBlock,
+                          applySoftmax);
   return result;
 }
 
