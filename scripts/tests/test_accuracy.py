@@ -86,7 +86,7 @@ def main():
     blockPartition_cuda  = blockPartition.cuda()
     edgeToColumn_cuda = edgeToColumn.cuda()
     edgeToRow_cuda  = edgeToRow.cuda()
-    RowWindowOffset, TCblockRowid,\
+    RowWindowOffset, sortedRowWindows, TCblockRowid,\
         TCblocktileId, TCblockoffset, SparseAToXindex,\
             block_count = TCFMM.preprocess_gpu(torch.IntTensor(A_csr_h.indices).cuda(), torch.IntTensor(A_csr_h.indptr).cuda(), size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
     # debug

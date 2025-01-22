@@ -33,9 +33,12 @@ seg_sort_dequ(int *seg, int *edgeLists, int *nodepointer, int *edgetocol,
               int *edgetorow, int *blockPartition, int *blocknum,
               int *row_window_offset, int blockSize_h, int blockSize_w,
               int num_nodes, int num_edges, int rowwindow_num);
+              
+torch::Tensor 
+sort_row_windows_by_tcb_count(const int* rowwindow_offset, int num_row_windows);
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-           torch::Tensor, torch::Tensor, torch::Tensor, int>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, 
+           torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int>
 preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
                int num_nodes, int blockSize_h, int blockSize_w,
                torch::Tensor blockPartition_tensor,
@@ -64,12 +67,17 @@ preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
       seg_out, edgeList, nodePointer, edgeToColumn, edgeToRow, blockPartition,
       block_num, row_window_offset, blockSize_h, blockSize_w, num_nodes,
       edgeList_tensor.size(0), blockPartition_tensor.size(0));
+  auto sorted_row_window_tensor = sort_row_windows_by_tcb_count(
+      row_window_offset_tensor.data_ptr<int>(), blockPartition_tensor.size(0));
   auto row_window_offset_tensor_cpu = row_window_offset_tensor.to(torch::kCPU);
-  auto tb_boundaries = assign_row_to_tb(row_window_offset_tensor_cpu.data_ptr<int>(), blockPartition_tensor.size(0));
+  auto tb_boundaries = assign_row_to_tb(
+    row_window_offset_tensor_cpu.data_ptr<int>(), 
+    blockPartition_tensor.size(0));
   auto tb_boundaries_tensor = torch::tensor(tb_boundaries, options_gpu);
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> elapsed_seconds = end - start;
-  std::cout << "\t GPU Preprocess time: " << elapsed_seconds.count()
+  std::cout << "\t GPU Preprocess time: " 
+            << elapsed_seconds.count()
             << " seconds\n";
   auto tcblock_offset_tensor = std::get<0>(tuple_tensor_blockcnt);
   auto tcblock_rowid_tensor = std::get<1>(tuple_tensor_blockcnt);
@@ -79,12 +87,12 @@ preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
   block_counter = std::get<5>(tuple_tensor_blockcnt);
   printf("TC_Blocks:\t%d\nExp_Edges:\t%d\n", block_counter,
          block_counter * 8 * 16);
-  return std::make_tuple(row_window_offset_tensor, tcblock_rowid_tensor,
-                         tcblocktile_id_tensor, tcblock_offset_tensor,
-                         sparse_AToX_index_tensor, tb_boundaries_tensor,
-                         tcblock_bit_map_tensor, block_counter);
+  return std::make_tuple(row_window_offset_tensor, sorted_row_window_tensor, 
+                         tcblock_rowid_tensor, tcblocktile_id_tensor, 
+                         tcblock_offset_tensor, sparse_AToX_index_tensor, 
+                         tb_boundaries_tensor, tcblock_bit_map_tensor, 
+                         block_counter);
 }
-
 
 // std::vector<torch::Tensor> 
 // fusedMM_forward_cuda(
@@ -118,6 +126,17 @@ f3sCuda1tb1rw(
     torch::Tensor Q, torch::Tensor K, torch::Tensor V,
     int nWarpPerBlock,
     bool applySoftmax);
+
+std::vector<torch::Tensor> 
+f3sCuda1tb1rwScheduled(
+    torch::Tensor rowWindowOffset,
+    torch::Tensor sortedRowWindows,
+    torch::Tensor sparseAToXidx,
+    torch::Tensor tcbBitMap,
+    int nNodes,
+    int embeddingDim,
+    torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+    int nWarpPerBlock);
 
 std::vector<torch::Tensor> 
 sddmmCuda1tbnrw(
@@ -200,6 +219,28 @@ f3s1tb1rw(
 }
 
 std::vector<torch::Tensor>
+f3s1tb1rwScheduled(
+    torch::Tensor rowWindowOffset,
+    torch::Tensor sortedRowWindows,
+    torch::Tensor sparseAToXidx,
+    torch::Tensor tcbBitMap,
+    int nNodes,
+    torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+    int nWarpPerBlock){
+  int embeddingDim = Q.size(1);
+  std::vector<torch::Tensor> result;
+  result = f3sCuda1tb1rwScheduled(rowWindowOffset, 
+                                  sortedRowWindows, 
+                                  sparseAToXidx, 
+                                  tcbBitMap, 
+                                  nNodes, 
+                                  embeddingDim, 
+                                  Q, K, V, 
+                                  nWarpPerBlock);
+  return result;
+}
+
+std::vector<torch::Tensor>
 sddmm1tbnrw(
   torch::Tensor rowWindowOffset,
   torch::Tensor tbBoundaries,
@@ -274,5 +315,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // m.def("fusedMM_forward", &fusedMM_forward, "FusedMM forward (CUDA)");
   m.def("f3s_1tb1tcb", &f3s1tb1tcb, "fused3S 1tb1tcb");
   m.def("f3s_1tb1rw", &f3s1tb1rw, "fused3S 1tb1rw");
+  m.def("f3s_1tb1rw_scheduled", &f3s1tb1rwScheduled, "fused3S 1tb1rw scheduled");
   m.def("sddmm_1tbnrw", &sddmm1tbnrw, "sddmm 1tbnrw");
 }

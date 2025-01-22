@@ -4,12 +4,15 @@
 #include <fstream>
 #include <sstream>
 #include <stdio.h>
+#include <vector>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 #include <thrust/sort.h>
 #include <thrust/unique.h>
+#include <thrust/execution_policy.h>
+#include <thrust/sequence.h>
+#include <thrust/adjacent_difference.h>
 #include <torch/extension.h>
-#include <vector>
 
 //////////////////////////////////////////////////////////////////////
 /// Preprocessing
@@ -383,4 +386,39 @@ void fill_segment_cuda(int *nodePointer, int *seg_out, int blockSize_h,
     printf("CUDA error: %s\n", cudaGetErrorString(error));
     exit(-1);
   }
+}
+
+// Sort row windows by number of TCBlocks in descending order
+// Returns array where sorted_row_window[i] contains index of row window with i-th most TCBlocks
+torch::Tensor sort_row_windows_by_tcb_count(const int* rowwindow_offset, int num_row_windows) {
+  auto options_gpu = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+  
+  // Create vectors for (count, index) pairs
+  thrust::device_vector<int> counts(num_row_windows+1);
+  thrust::device_vector<int> indices(num_row_windows);
+  thrust::sequence(indices.begin(), indices.end());
+  
+  // Calculate TCBlock counts for each window
+  // the first element of count = rowwindow_offset[0], has to be skipped
+  thrust::adjacent_difference(
+      rowwindow_offset,                         // Input start
+      rowwindow_offset + num_row_windows + 1,  // Input end
+      counts.begin()                            // Output start
+  );
+  
+  // Sort by counts in descending order while keeping track of original indices
+  thrust::sort_by_key(
+    thrust::device,
+    counts.begin()+1,
+    counts.end(),
+    indices.begin(),
+    thrust::greater<int>()
+  );
+  
+  // Create and return tensor with sorted indices
+  auto sorted_row_window = torch::zeros({num_row_windows}, options_gpu);
+  thrust::copy(indices.begin(), indices.end(), 
+               thrust::device_pointer_cast(sorted_row_window.data_ptr<int>()));
+  
+  return sorted_row_window;
 }

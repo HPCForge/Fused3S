@@ -26,9 +26,9 @@ def PrintGraphStruct(g):
 def test_format(args, dev, g):
     X = g.ndata["feat"]
     num_attention_heads = 1
-    Q = torch.rand(X.shape[0], num_attention_heads, args.dim, dtype=torch.float32, device=dev)
-    K = torch.rand(X.shape[0], num_attention_heads, args.dim, dtype=torch.float32, device=dev)
-    V = torch.rand(X.shape[0], num_attention_heads, args.dim, dtype=torch.float32, device=dev)
+    Q = torch.rand(X.shape[0], num_attention_heads, args.embedding_dim, dtype=torch.float32, device=dev)
+    K = torch.rand(X.shape[0], num_attention_heads, args.embedding_dim, dtype=torch.float32, device=dev)
+    V = torch.rand(X.shape[0], num_attention_heads, args.embedding_dim, dtype=torch.float32, device=dev)
     preprocess_func = load_prepfunc(args)
     if args.format == "csr_gm":
         indptr, indices, val, _ = preprocess_func(g)
@@ -49,16 +49,16 @@ def test_format(args, dev, g):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--format", type=str, default="csr_gm", choices=["csr_gm", "tiling", "softmax_gm"])
-    parser.add_argument("--embedding_dim", type=int, default=128)
+    parser.add_argument("--embedding_dim", "-d", type=int, default=128)
     parser.add_argument("--dataset", type=str, default="reddit", choices=["reddit", "ppa", "protein"])
     parser.add_argument("--dataDir", type=str, default="/share/crsp/lab/amowli/share/Fused3S/dfgnn")
     args = parser.parse_args()
-    assert args.dim < 320, "dim should be less than 320"
-    assert args.dim % 32 == 0, "dim should be divisible by 32"
+    assert args.embedding_dim < 320, "dim should be less than 320"
+    assert args.embedding_dim % 32 == 0, "dim should be divisible by 32"
 
     print("format:", args.format)
     print("dataset:", args.dataset)
-    print("hidden dim", args.dim)
+    print("hidden dim", args.embedding_dim)
 
     # If CUDA is available, use GPU to accelerate the training, use CPU
     # otherwise.

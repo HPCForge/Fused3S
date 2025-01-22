@@ -15,7 +15,7 @@ def run_f3s_1tb1rw(indptr, indices, num_nodes, num_edges, Q, K, V, n_warp_per_bl
   blockPartition_cuda = torch.zeros(num_row_windows, dtype=torch.int).cuda()
   edgeToColumn_cuda = torch.zeros(num_edges, dtype=torch.int).cuda()
   edgeToRow_cuda = torch.zeros(num_edges, dtype=torch.int).cuda()
-  RowWindowOffset, TCblockRowid, TCblocktileId,\
+  RowWindowOffset, sortedRowWindows, TCblockRowid, TCblocktileId,\
   TCblockoffset, SparseAToXindex, TBBoundaries, TCblockBitMap,\
   block_count = TCFMM.preprocess_gpu(indices, indptr, num_nodes, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
   print("preprocess done")

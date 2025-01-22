@@ -24,7 +24,7 @@ def convert_row_major_nz_to_block_row_major(A, BLK_H, BLK_W):
 # 3. Inside each row block, group the remaining columns into groups of BLK_W. This should result in submatrices of size BLK_H x BLK_W
 # 4. Go through these submatrices in each row block. for each submatrices, write their values into R in row-major order.
 # 5. return R
-def process_matrix(mat, BLK_H, BLK_W, use_1w1tcb):
+def process_matrix(mat, BLK_H, BLK_W, use_1tb1rw):
     M, K = mat.shape
     num_blocks = (M + BLK_H - 1) // BLK_H  # Ceiling division to get the number of row blocks
 
@@ -44,7 +44,7 @@ def process_matrix(mat, BLK_H, BLK_W, use_1w1tcb):
         # Step 3: Group remaining columns into groups of BLK_W
         num_columns_remaining = block_rows.shape[1]
         num_tcb_in_rw = (num_columns_remaining + BLK_W - 1) // BLK_W  # Ceiling division
-        if use_1w1tcb:
+        if use_1tb1rw:
           # Round up to nearest even number 
           # this is because in 1tb1rw we need 16x16 blocks in SDDMM result for SpMM
           num_tcb_in_rw = (num_tcb_in_rw + 1) // 2 * 2
@@ -111,14 +111,13 @@ def main(args):
   BLK_H = 16
   BLK_W = 8
   # whether to use new parallel strategy where each warp computes a tcb
-  use_1tb1rw = True
-  use_1w1tcb = not args.use_1tb1tcb
   apply_softmax = not args.skip_softmax
   embedding_size = args.embedding_size
   size = args.size
   density = args.density
-  if use_1w1tcb and use_1tb1rw:
+  if args.alg == '1tb1rw' or args.alg == '1tb1rw_scheduled':
      BLK_W = 16
+     use_1tb1rw = True
   save_sddmm_result = True
   # for 1tb1rw and 1tbnrw, the number of warps per block
   nWarpPerBlock = 8
@@ -164,8 +163,8 @@ def main(args):
     # BLK_M = 16, BLK_N = 8, but BLK_H = 16, BLK_W = 16
     # I'm detaching the size of the output block from the mma block size.
     # This is to deal with odd number of TCBs.
-    sddmm_true_half = process_matrix(sddmm_half_og_form, 16, 8, use_1w1tcb)
-    sddmm_true = process_matrix(sddmm_og_form, 16, 8, use_1w1tcb)
+    sddmm_true_half = process_matrix(sddmm_half_og_form, 16, 8, use_1tb1rw)
+    sddmm_true = process_matrix(sddmm_og_form, 16, 8, use_1tb1rw)
     sddmm_true_norm = torch.norm(sddmm_true)
     rel_err = torch.norm(sddmm_true - sddmm_true_half)/sddmm_true_norm
     half_v_float_sddmm.append(rel_err.item())
@@ -190,22 +189,25 @@ def main(args):
     edgeToRow_cuda  = edgeToRow.cuda()
     indptr = torch.IntTensor(A_csr_h.indices).cuda()
     indices = torch.IntTensor(A_csr_h.indptr).cuda()
-    RowWindowOffset, TCblockRowid,\
+    RowWindowOffset, sortedRowWindows, TCblockRowid,\
     TCblocktileId, TCblockoffset, SparseAToXindex,\
     TBBoundaries, TCblockBitMap, block_count = TCFMM.preprocess_gpu(indptr, indices, size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
     start_time = time.time()
     for i in range(n_runs):
-      if use_1w1tcb:
-        if use_1tb1rw:
-          print("using 1tb1rw")
-          fusedR, sddmm_result = TCFMM.f3s_1tb1rw(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, nWarpPerBlock, apply_softmax)
-        else:
-          print("using 1tbnrw")
-          sddmm_result = TCFMM.sddmm_1tbnrw(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, nWarpPerBlock)[0]
-          fusedR = None
-      else:
+      if args.alg == '1tb1rw':
+        fusedR, sddmm_result = TCFMM.f3s_1tb1rw(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, nWarpPerBlock, apply_softmax)
+      elif args.alg == '1tb1rw_scheduled':
+        print("using 1tb1rw_scheduled")
+        fusedR, sddmm_result = TCFMM.f3s_1tb1rw_scheduled(RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, nWarpPerBlock)
+      elif args.alg == '1tbnrw':
+        print("using 1tbnrw")
+        sddmm_result = TCFMM.sddmm_1tbnrw(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, nWarpPerBlock)[0]
+        fusedR = None
+      elif args.alg == '1tb1tcb':
         print("using 1tb1tcb")
         fusedR, sddmm_result = TCFMM.f3s_1tb1tcb(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, apply_softmax, save_sddmm_result)
+      else:
+        raise ValueError(f"Invalid algorithm: {args.alg}")
     f3s_time = (time.time() - start_time)/n_runs
     print(f"f3s_time: {f3s_time}")
     # Print full SDDMM result without truncation
@@ -250,7 +252,7 @@ if __name__ == "__main__":
   parser.add_argument("--size", '-s', type=int, default=1000)
   parser.add_argument("--density", '-d', type=float, default=0.1)
   parser.add_argument("--skip_softmax", action='store_true')
-  parser.add_argument("--use_1tb1tcb", '-1tb1tcb', action='store_true')
+  parser.add_argument("--alg", '-a', type=str, default='1tb1rw', choices=['1tb1tcb', '1tb1rw', '1tb1rw_scheduled'])
   args = parser.parse_args()
   main(args)
 
