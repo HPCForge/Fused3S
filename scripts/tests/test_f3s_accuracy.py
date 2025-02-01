@@ -252,7 +252,7 @@ if __name__ == "__main__":
   parser.add_argument("--size", '-s', type=int, default=1000)
   parser.add_argument("--density", '-d', type=float, default=0.1)
   parser.add_argument("--skip_softmax", action='store_true')
-  parser.add_argument("--alg", '-a', type=str, default='1tb1rw', choices=['1tb1tcb', '1tb1rw', '1tb1rw_scheduled'])
+  parser.add_argument("--alg", '-a', type=str, default='1tb1rw_scheduled', choices=['1tb1tcb', '1tb1rw', '1tb1rw_scheduled'])
   args = parser.parse_args()
   main(args)
 

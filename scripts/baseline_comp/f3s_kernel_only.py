@@ -6,6 +6,21 @@ import argparse
 from ogb.linkproppred import DglLinkPropPredDataset
 from ogb.nodeproppred import DglNodePropPredDataset
 
+def timing_decorator(kernel):
+  def wrapper(*args, **kwargs):
+    # warmup
+    for i in range(10):
+      start_event = torch.cuda.Event(enable_timing=True)
+      end_event = torch.cuda.Event(enable_timing=True)
+      start_event.record()
+      out = kernel(*args, **kwargs)
+      end_event.record()
+      torch.cuda.synchronize()
+      execution_time = start_event.elapsed_time(end_event)
+      print(f"execution time: {execution_time} ms")
+    return out
+  return wrapper
+
 def main(args):
   BLK_H = 16
   if args.alg == '1tb1rw' or args.alg == '1tb1rw_scheduled':
@@ -48,24 +63,35 @@ def main(args):
   edgeToRow_cuda = torch.zeros(num_edges, dtype=torch.int).cuda()
   RowWindowOffset, sortedRowWindows, TCblockRowid, TCblocktileId,\
   TCblockoffset, SparseAToXindex, TBBoundaries, TCblockBitMap,\
-  block_count = TCFMM.preprocess_gpu(indices, indptr, num_nodes, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
+  block_count = TCFMM.preprocess_gpu(indices, indptr, num_nodes, 
+                                     BLK_H, BLK_W, blockPartition_cuda, 
+                                     edgeToColumn_cuda, edgeToRow_cuda)
+
+  if args.use_cuda_event:
+    f3s_1tb1rw = timing_decorator(TCFMM.f3s_1tb1rw)
+    f3s_1tb1rw_scheduled= timing_decorator(TCFMM.f3s_1tb1rw_scheduled)
+    f3s_1tb1tcb = timing_decorator(TCFMM.f3s_1tb1tcb)
+  else:
+    f3s_1tb1rw = TCFMM.f3s_1tb1rw
+    f3s_1tb1rw_scheduled = TCFMM.f3s_1tb1rw_scheduled
+    f3s_1tb1tcb = TCFMM.f3s_1tb1tcb
 
   if args.alg == '1tb1rw':
-    final_result, sddmm_result_1tb1rw = TCFMM.f3s_1tb1rw(
+    final_result, sddmm_result_1tb1rw = f3s_1tb1rw(
       RowWindowOffset, SparseAToXindex, TCblockBitMap, 
       num_nodes, Q, K, V, args.n_warp_per_block, True)
   elif args.alg == '1tb1rw_no_softmax':
-    final_result, sddmm_result_1tb1rw = TCFMM.f3s_1tb1rw(
+    final_result, sddmm_result_1tb1rw = f3s_1tb1rw(
       RowWindowOffset, SparseAToXindex, TCblockBitMap, 
       num_nodes, Q, K, V, args.n_warp_per_block, False)
   elif args.alg == '1tb1rw_scheduled':
-    final_result, sddmm_result_1tb1rw_scheduled = TCFMM.f3s_1tb1rw_scheduled(
+    final_result, sddmm_result_1tb1rw_scheduled = f3s_1tb1rw_scheduled(
       RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
       num_nodes, Q, K, V, args.n_warp_per_block)
   elif args.alg == '1tb1tcb':
     apply_softmax = True
     save_sddmm_result = False
-    final_result, sddmm_result_1tb1tcb = TCFMM.f3s_1tb1tcb(
+    final_result, sddmm_result_1tb1tcb = f3s_1tb1tcb(
       RowWindowOffset, SparseAToXindex, TCblockBitMap, 
       num_nodes, Q, K, V, apply_softmax, save_sddmm_result)
   else:
@@ -80,7 +106,9 @@ if __name__ == "__main__":
                        help='Number of warps per block')
     parser.add_argument('--dataset', '-d', type=str, default="reddit",
                        choices=["reddit", "ppa", "protein", "cora", "pubmed"])
-    parser.add_argument("--alg", '-a', type=str, default='1tb1rw', 
+    parser.add_argument("--alg", '-a', type=str, default='1tb1rw_scheduled', 
                         choices=['1tb1tcb', '1tb1rw', '1tb1rw_no_softmax', '1tb1rw_scheduled'])
+    parser.add_argument("--use_cuda_event", action='store_true', 
+                        help='Use CUDA event to measure time, no timer is used otherwise')
     args = parser.parse_args()
     main(args)
