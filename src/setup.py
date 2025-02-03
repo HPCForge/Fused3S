@@ -16,6 +16,8 @@ setup(
               '-O3',
               '-use_fast_math',
               '-ftz=true',
+              '-prec-div=false',
+              '-prec-sqrt=false',
               '-lineinfo',
               '-arch=sm_80',
               # '-Xptxas', '-v',

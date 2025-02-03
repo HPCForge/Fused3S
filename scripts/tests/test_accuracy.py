@@ -86,9 +86,9 @@ def main():
     blockPartition_cuda  = blockPartition.cuda()
     edgeToColumn_cuda = edgeToColumn.cuda()
     edgeToRow_cuda  = edgeToRow.cuda()
-    RowWindowOffset, sortedRowWindows, TCblockRowid,\
-        TCblocktileId, TCblockoffset, SparseAToXindex,\
-            block_count = TCFMM.preprocess_gpu(torch.IntTensor(A_csr_h.indices).cuda(), torch.IntTensor(A_csr_h.indptr).cuda(), size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
+    out = TCFMM.preprocess_gpu(torch.IntTensor(A_csr_h.indices).cuda(), torch.IntTensor(A_csr_h.indptr).cuda(), size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
+    print(len(out))
+    raise Exception("stop")
     # debug
     print(TCblockoffset[1])
     cols = SparseAToXindex[:5]

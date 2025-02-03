@@ -16,7 +16,7 @@ def test(data, args):
     X_prime = torch.rand(inputInfo.num_nodes, args.hidden).half().to(device)
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
-    n_iter = 1
+    n_iter = 10
     if(args.softmax_type == 0):
       for i in range(n_iter):
         torch.cuda.synchronize()

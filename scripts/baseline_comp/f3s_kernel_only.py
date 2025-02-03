@@ -28,19 +28,19 @@ def main(args):
   else:
     BLK_W = 8
   num_heads = 1
-  dataset_dir = "/share/crsp/lab/amowli/share/Fused3S/dfgnn/"
+  dataset_dir = "/share/crsp/lab/amowli/share/Fused3S/dataLoader/"
   dev = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
   if args.dataset == "reddit":
-    dataset = RedditDataset(raw_dir=dataset_dir)
+    dataset = RedditDataset(raw_dir=dataset_dir+args.dataset)
   elif args.dataset == "ppa":
-    dataset = DglLinkPropPredDataset(name="ogbl-ppa", root=dataset_dir)
+    dataset = DglLinkPropPredDataset(name="ogbl-ppa", root=dataset_dir+args.dataset)
   elif args.dataset == "protein":
-    dataset = DglNodePropPredDataset(name="ogbn-proteins", root=dataset_dir)
+    dataset = DglNodePropPredDataset(name="ogbn-proteins", root=dataset_dir+args.dataset)
   elif args.dataset == "cora":
-    dataset = CoraGraphDataset(raw_dir=dataset_dir)
+    dataset = CoraGraphDataset(raw_dir=dataset_dir+args.dataset)
   elif args.dataset == "pubmed":
-    dataset = PubmedGraphDataset(raw_dir=dataset_dir)
+    dataset = PubmedGraphDataset(raw_dir=dataset_dir+args.dataset)
   else:
     raise ValueError(f"dataset: {dataset} not supported in this test")
   g = dataset[0].to(dev)

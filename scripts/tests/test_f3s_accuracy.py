@@ -115,9 +115,10 @@ def main(args):
   embedding_size = args.embedding_size
   size = args.size
   density = args.density
+  use_1tb1rw = False
   if args.alg == '1tb1rw' or args.alg == '1tb1rw_scheduled':
-     BLK_W = 16
-     use_1tb1rw = True
+    use_1tb1rw = True
+    BLK_W = 16
   save_sddmm_result = True
   # for 1tb1rw and 1tbnrw, the number of warps per block
   nWarpPerBlock = 8
@@ -191,21 +192,29 @@ def main(args):
     indices = torch.IntTensor(A_csr_h.indptr).cuda()
     RowWindowOffset, sortedRowWindows, TCblockRowid,\
     TCblocktileId, TCblockoffset, SparseAToXindex,\
-    TBBoundaries, TCblockBitMap, block_count = TCFMM.preprocess_gpu(indptr, indices, size, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
+    TBBoundaries, TCblockBitMap, block_count = TCFMM.preprocess_gpu(indptr, indices, size, 
+                                                                    BLK_H, BLK_W, 
+                                                                    blockPartition_cuda, 
+                                                                    edgeToColumn_cuda, 
+                                                                    edgeToRow_cuda)
     start_time = time.time()
     for i in range(n_runs):
       if args.alg == '1tb1rw':
-        fusedR, sddmm_result = TCFMM.f3s_1tb1rw(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, nWarpPerBlock, apply_softmax)
+        fusedR, sddmm_result = TCFMM.f3s_1tb1rw(RowWindowOffset, SparseAToXindex, TCblockBitMap, 
+                                                size, Q_half, K_half, V_half, nWarpPerBlock, apply_softmax)
       elif args.alg == '1tb1rw_scheduled':
         print("using 1tb1rw_scheduled")
-        fusedR, sddmm_result = TCFMM.f3s_1tb1rw_scheduled(RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, nWarpPerBlock)
+        fusedR, sddmm_result = TCFMM.f3s_1tb1rw_scheduled(RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
+                                                          size, Q_half, K_half, V_half, nWarpPerBlock)
       elif args.alg == '1tbnrw':
         print("using 1tbnrw")
-        sddmm_result = TCFMM.sddmm_1tbnrw(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, nWarpPerBlock)[0]
+        sddmm_result = TCFMM.sddmm_1tbnrw(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, 
+                                          size, Q_half, K_half, nWarpPerBlock)[0]
         fusedR = None
       elif args.alg == '1tb1tcb':
         print("using 1tb1tcb")
-        fusedR, sddmm_result = TCFMM.f3s_1tb1tcb(RowWindowOffset, SparseAToXindex, TCblockBitMap, size, Q_half, K_half, V_half, apply_softmax, save_sddmm_result)
+        fusedR, sddmm_result = TCFMM.f3s_1tb1tcb(RowWindowOffset, SparseAToXindex, TCblockBitMap, 
+                                                 size, Q_half, K_half, V_half, apply_softmax, save_sddmm_result)
       else:
         raise ValueError(f"Invalid algorithm: {args.alg}")
     f3s_time = (time.time() - start_time)/n_runs
@@ -217,10 +226,10 @@ def main(args):
     if fusedR is not None:
       print(fusedR.shape)
       print(true.shape)
-      # for i in range(4):
+      # for i in range(1):
       #   print(fusedR[:, i*8:(i+1)*8])
       # print("--------------------------------")
-      # for i in range(4):
+      # for i in range(1):
       #   print(true[:, i*8:(i+1)*8])
 
       diff = fusedR - true
@@ -248,11 +257,12 @@ def main(args):
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
-  parser.add_argument("--embedding_size", '-emb', type=int, default=320)
+  parser.add_argument("--embedding_size", '-emb', type=int, default=128)
   parser.add_argument("--size", '-s', type=int, default=1000)
   parser.add_argument("--density", '-d', type=float, default=0.1)
   parser.add_argument("--skip_softmax", action='store_true')
-  parser.add_argument("--alg", '-a', type=str, default='1tb1rw_scheduled', choices=['1tb1tcb', '1tb1rw', '1tb1rw_scheduled'])
+  parser.add_argument("--alg", '-a', type=str, default='1tb1rw_scheduled', 
+                      choices=['1tb1tcb', '1tb1rw', '1tb1rw_scheduled'])
   args = parser.parse_args()
   main(args)
 
