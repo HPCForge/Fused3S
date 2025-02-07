@@ -191,7 +191,11 @@ def route_f3s(args, sparse_rep, Q, K, V, num_nodes):
   elif args.alg == 'f3s_1tb1rw_scheduled':
     final_result, sddmm_result_1tb1rw_scheduled = f3s_1tb1rw_scheduled(
       RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
-      num_nodes, Q, K, V, args.n_warp_per_block)
+      num_nodes, Q, K, V, args.n_warp_per_block, False)
+  elif args.alg == 'f3s_1tb1rw_scheduled_permuteV':
+    final_result, sddmm_result_1tb1rw_scheduled = f3s_1tb1rw_scheduled(
+      RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
+      num_nodes, Q, K, V, args.n_warp_per_block, True)
   elif args.alg == 'f3s_1tb1tcb':
     apply_softmax = True
     save_sddmm_result = False
@@ -305,7 +309,8 @@ if __name__ == "__main__":
     parser.add_argument('--method', '-m', type=str, default="f3s",
                        choices=["f3s", "flashSparse", "df-gnn"])
     parser.add_argument("--alg", '-a', type=str, default='f3s_1tb1rw_scheduled', 
-                        choices=['f3s_1tb1tcb', 'f3s_1tb1rw', 'f3s_1tb1rw_no_softmax', 'f3s_1tb1rw_scheduled', 
+                        choices=['f3s_1tb1tcb', 'f3s_1tb1rw', 'f3s_1tb1rw_no_softmax', 
+                                 'f3s_1tb1rw_scheduled', 'f3s_1tb1rw_scheduled_permuteV',
                                  'fs_no_softmax', 'fs_naive_softmax', 'fs_stable_softmax', 
                                  'dfgnn_tiling', 'dfgnn_hyper'])
     parser.add_argument("--use_cuda_event", action='store_true', 

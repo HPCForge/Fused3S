@@ -136,7 +136,8 @@ f3sCuda1tb1rwScheduled(
     int nNodes,
     int embeddingDim,
     torch::Tensor Q, torch::Tensor K, torch::Tensor V,
-    int nWarpPerBlock);
+    int nWarpPerBlock,
+    bool permuteV);
 
 std::vector<torch::Tensor> 
 sddmmCuda1tbnrw(
@@ -226,7 +227,8 @@ f3s1tb1rwScheduled(
     torch::Tensor tcbBitMap,
     int nNodes,
     torch::Tensor Q, torch::Tensor K, torch::Tensor V,
-    int nWarpPerBlock){
+    int nWarpPerBlock,
+    bool permuteV){
   int embeddingDim = Q.size(1);
   std::vector<torch::Tensor> result;
   result = f3sCuda1tb1rwScheduled(rowWindowOffset, 
@@ -236,7 +238,8 @@ f3s1tb1rwScheduled(
                                   nNodes, 
                                   embeddingDim, 
                                   Q, K, V, 
-                                  nWarpPerBlock);
+                                  nWarpPerBlock,
+                                  permuteV);
   return result;
 }
 

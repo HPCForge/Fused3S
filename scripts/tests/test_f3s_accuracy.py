@@ -116,7 +116,7 @@ def main(args):
   size = args.size
   density = args.density
   use_1tb1rw = False
-  if args.alg == '1tb1rw' or args.alg == '1tb1rw_scheduled':
+  if args.alg == '1tb1rw' or args.alg == '1tb1rw_scheduled' or args.alg == '1tb1rw_scheduled_permuteV':
     use_1tb1rw = True
     BLK_W = 16
   save_sddmm_result = True
@@ -205,7 +205,11 @@ def main(args):
       elif args.alg == '1tb1rw_scheduled':
         print("using 1tb1rw_scheduled")
         fusedR, sddmm_result = TCFMM.f3s_1tb1rw_scheduled(RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
-                                                          size, Q_half, K_half, V_half, nWarpPerBlock)
+                                                          size, Q_half, K_half, V_half, nWarpPerBlock, False)
+      elif args.alg == '1tb1rw_scheduled_permuteV':
+        print("using 1tb1rw_scheduled_permuteV")
+        fusedR, sddmm_result = TCFMM.f3s_1tb1rw_scheduled(RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
+                                                          size, Q_half, K_half, V_half, nWarpPerBlock, True)
       elif args.alg == '1tbnrw':
         print("using 1tbnrw")
         sddmm_result = TCFMM.sddmm_1tbnrw(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, 
@@ -220,17 +224,18 @@ def main(args):
     f3s_time = (time.time() - start_time)/n_runs
     print(f"f3s_time: {f3s_time}")
     # Print full SDDMM result without truncation
-    torch.set_printoptions(precision=2, threshold=float('inf'))
     rel_err = torch.norm(sddmm_result - sddmm_true) / sddmm_true_norm
     f3s_v_true_fp32_sddmm.append(rel_err.item())
+
+    torch.set_printoptions(precision=2, threshold=float('inf'))
     if fusedR is not None:
       print(fusedR.shape)
       print(true.shape)
       # for i in range(1):
-      #   print(fusedR[:, i*8:(i+1)*8])
+      #   print(fusedR[:, :])
       # print("--------------------------------")
       # for i in range(1):
-      #   print(true[:, i*8:(i+1)*8])
+      #   print(true[:, :])
 
       diff = fusedR - true
       max_diff = torch.max(torch.abs(diff))
@@ -261,8 +266,8 @@ if __name__ == "__main__":
   parser.add_argument("--size", '-s', type=int, default=1000)
   parser.add_argument("--density", '-d', type=float, default=0.1)
   parser.add_argument("--skip_softmax", action='store_true')
-  parser.add_argument("--alg", '-a', type=str, default='1tb1rw_scheduled', 
-                      choices=['1tb1tcb', '1tb1rw', '1tb1rw_scheduled'])
+  parser.add_argument("--alg", '-a', type=str, default='1tb1rw_scheduled_permuteV', 
+                      choices=['1tb1tcb', '1tb1rw', '1tb1rw_scheduled', '1tb1rw_scheduled_permuteV'])
   args = parser.parse_args()
   main(args)
 
