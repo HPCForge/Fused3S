@@ -94,17 +94,6 @@ preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
                          block_counter);
 }
 
-// std::vector<torch::Tensor> 
-// fusedMM_forward_cuda(
-// 	torch::Tensor TCblock_rowid, torch::Tensor TCblocktile_id,
-//   torch::Tensor TCblock_offset, torch::Tensor sparse_AToX_idx,
-//   int num_nodes, int num_edges,
-//   int embedding_dim,  // embedding dimension.
-//   torch::Tensor input, // input feature matrix.
-//   bool save_edge_attention,
-//   bool use_f32_edge_attention,
-//   bool use_m8n32k16
-// );
 std::vector<torch::Tensor>
 f3sCuda1tb1tcb(
     torch::Tensor rowWindowOffset,
@@ -151,45 +140,6 @@ sddmmCuda1tbnrw(
     torch::Tensor Q, torch::Tensor K,
     int nWarpPerBlock);
 
-// std::vector<torch::Tensor>
-// fusedMM_forward(torch::Tensor input, torch::Tensor TCblock_rowid,
-//                 torch::Tensor TCblocktile_id,
-//                 torch::Tensor TCblock_offset,
-//                 torch::Tensor sparse_AToX_idx, int num_nodes, 
-//                 bool save_edge_attention,
-//                 bool use_f32_edge_attention,
-//                 bool use_m8n32k16) {
-//   CHECK_INPUT(input);
-//   CHECK_INPUT(TCblock_rowid);
-//   CHECK_INPUT(TCblocktile_id);
-//   CHECK_INPUT(TCblock_offset);
-//   CHECK_INPUT(sparse_AToX_idx);
-
-//   int num_edges = TCblocktile_id.size(0);
-//   int embedding_dim = input.size(1);
-
-//   cudaEvent_t start, stop;
-//   float elapsedTime;
-//   cudaEventCreate(&start);
-//   cudaEventCreate(&stop);
-//   cudaEventRecord(start, 0);
-//   auto result = fusedMM_forward_cuda(TCblock_rowid, TCblocktile_id, 
-//                                      TCblock_offset, sparse_AToX_idx, 
-//                                      num_nodes, num_edges, 
-//                                      embedding_dim, 
-//                                      input, 
-//                                      save_edge_attention,
-//                                      use_f32_edge_attention,
-//                                      use_m8n32k16);
-//   cudaEventRecord(stop, 0);
-//   cudaEventSynchronize(stop);
-//   cudaEventElapsedTime(&elapsedTime, start, stop);
-//   cudaEventDestroy(start);
-//   cudaEventDestroy(stop);
-//   printf("fusedMM execution time (cuda events): %f ms\n", elapsedTime);
-//   return result;
-// }
-
 std::vector<torch::Tensor>
 f3s1tb1rw(
   torch::Tensor rowWindowOffset,
@@ -227,8 +177,7 @@ f3s1tb1rwScheduled(
     torch::Tensor tcbBitMap,
     int nNodes,
     torch::Tensor Q, torch::Tensor K, torch::Tensor V,
-    int nWarpPerBlock,
-    bool permuteV){
+    int nWarpPerBlock){
   int embeddingDim = Q.size(1);
   std::vector<torch::Tensor> result;
   result = f3sCuda1tb1rwScheduled(rowWindowOffset, 
@@ -239,7 +188,30 @@ f3s1tb1rwScheduled(
                                   embeddingDim, 
                                   Q, K, V, 
                                   nWarpPerBlock,
-                                  permuteV);
+                                  false);
+  return result;
+}
+// same as f3s1tb1rwScheduled except permute V = true
+std::vector<torch::Tensor>
+f3s1tb1rwScheduledPermuteV(
+    torch::Tensor rowWindowOffset,
+    torch::Tensor sortedRowWindows,
+    torch::Tensor sparseAToXidx,
+    torch::Tensor tcbBitMap,
+    int nNodes,
+    torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+    int nWarpPerBlock){
+  int embeddingDim = Q.size(1);
+  std::vector<torch::Tensor> result;
+  result = f3sCuda1tb1rwScheduled(rowWindowOffset, 
+                                  sortedRowWindows, 
+                                  sparseAToXidx, 
+                                  tcbBitMap, 
+                                  nNodes, 
+                                  embeddingDim, 
+                                  Q, K, V, 
+                                  nWarpPerBlock,
+                                  true);
   return result;
 }
 
@@ -289,13 +261,7 @@ f3s1tb1tcb(torch::Tensor rowWindowOffset,
   CHECK_INPUT(rowWindowOffset);
   CHECK_INPUT(sparseAToXidx);
   CHECK_INPUT(tcbBitMap);
-  cudaEvent_t start, stop;
-  float elapsedTime;
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
-
   int embeddingDim = Q.size(1);
-  cudaEventRecord(start, 0);
   auto result = f3sCuda1tb1tcb(rowWindowOffset, 
                                sparseAToXidx, 
                                tcbBitMap,
@@ -304,12 +270,6 @@ f3s1tb1tcb(torch::Tensor rowWindowOffset,
                                Q, K, V, 
                                applySoftmax,
                                saveSddmmResult);
-  cudaEventRecord(stop, 0);
-  cudaEventSynchronize(stop);
-  cudaEventElapsedTime(&elapsedTime, start, stop);
-  cudaEventDestroy(start);
-  cudaEventDestroy(stop);
-  printf("f3S forward execution time (cuda events): %f ms\n", elapsedTime);
   return result;
 }
 
@@ -319,5 +279,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("f3s_1tb1tcb", &f3s1tb1tcb, "fused3S 1tb1tcb");
   m.def("f3s_1tb1rw", &f3s1tb1rw, "fused3S 1tb1rw");
   m.def("f3s_1tb1rw_scheduled", &f3s1tb1rwScheduled, "fused3S 1tb1rw scheduled");
+  m.def("f3s_1tb1rw_scheduled_permuteV", &f3s1tb1rwScheduledPermuteV, "fused3S 1tb1rw scheduled permuteV");
   m.def("sddmm_1tbnrw", &sddmm1tbnrw, "sddmm 1tbnrw");
 }

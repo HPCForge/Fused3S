@@ -1,16 +1,41 @@
 import argparse
 import torch
 import numpy as np
+import pandas as pd
 from scipy.sparse import coo_matrix
 from torch_geometric.utils import softmax
 import FS_Block
 import FS_SDDMM
 import FS_SpMM
+import dgl.sparse as dglsp
 
+class Perf:
+  def __init__(self, algs, datasets):
+    self.pd = pd.DataFrame(index=datasets, columns=algs)
+
+datasets = ["reddit", "amazonProducts", "yelp", "amazon0505", "Artist", "Blog", "com-amazon.ungraph", "github.npz", "Ell", "ogbn-products", "citeseer", "pubmed", "cora"]
+
+algs = ['f3s_1tb1tcb', 'f3s_1tb1rw', 'f3s_1tb1rw_no_softmax', 
+        'f3s_1tb1rw_scheduled', 'f3s_1tb1rw_scheduled_permuteV',
+        'flashSparse_no_softmax', 'flashSparse_naive_softmax', 'flashSparse_stable_softmax', 
+        'GTConvFuse_inference_tiling', 'GTConvFuse_inference_hyper']
+
+class GraphInfo:
+  def __init__(self, name, row_pointers, column_index, rows, num_nodes, num_edges, disable_dfgnn_hyper=False):
+    self.name = name
+    self.row_pointers = row_pointers
+    self.column_index = column_index
+    # row indices of all non-zero elements in the adjacency matrix, required by dfgnn
+    self.rows = rows
+    assert len(rows) == len(column_index)
+    self.num_nodes = num_nodes
+    self.num_edges = num_edges
+    self.disable_dfgnn_hyper = disable_dfgnn_hyper
 
 # only for flashSparse
 class InputInfo:
   def __init__(self):
+    self.name = None
     self.row_pointers = None
     self.column_index = None
     self.degrees = None
@@ -22,14 +47,14 @@ class InputInfo:
     self.num_edges = None
     self.ones = None
 
-def timing_decorator(kernel):
+def event_timing_decorator(kernel, graphInfo, perf):
   def wrapper(*args, **kwargs):
-    niter = 10
+    niter = 3
     # warmup
-    for i in range(5):
+    for i in range(3):
       out = kernel(*args, **kwargs)
-    # torch.cuda.synchronize()
-    print("warmup done")
+    torch.cuda.synchronize()
+    print(f"{kernel.__name__} warmup done")
     execution_time = 0
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
@@ -40,20 +65,36 @@ def timing_decorator(kernel):
       end_event.synchronize()
       execution_time += start_event.elapsed_time(end_event)
     execution_time /= niter
-    print(f"average execution time: {execution_time} ms")
+    print(f"{kernel.__name__} average execution time: {execution_time} ms")
+    perf.pd.loc[graphInfo.name, kernel.__name__] = execution_time
     return out
   return wrapper
 
+def timing_decorator(kernel, graphInfo, perf):
+  def wrapper(*args, **kwargs):
+    niter = 3
+    # warmup
+    for i in range(3):
+      kernel(*args, **kwargs)
+    total_time = 0
+    for i in range(niter):
+      output = kernel(*args, **kwargs)
+      total_time += output[0].item()
+    avg_time = total_time / niter
+    print(f"{kernel.__name__} average execution time: {avg_time} ms")
+    perf.pd.loc[graphInfo.name, kernel.__name__] = avg_time
+    return output
+  return wrapper
 
 def flashSparse_no_softmax(X_prime, inputInfo):
-  att = FS_SDDMM.forward_gen_fp16_gnn(   
+  sddmm_time, att = FS_SDDMM.forward_gen_fp16_gnn(   
             X_prime.size(1),                                      
             inputInfo.row_pointers, 
             inputInfo.column_index, 
             inputInfo.degrees, 
             inputInfo.t_window_rowTensor,
-            X_prime,X_prime,inputInfo.max)[0] 
-  h_prime = FS_SpMM.forward_fp16_gnn(   
+            X_prime,X_prime,inputInfo.max)
+  spmm_time, h_prime = FS_SpMM.forward_fp16_gnn(   
               inputInfo.row_pointers, 
               inputInfo.column_index, 
               att, 
@@ -62,19 +103,26 @@ def flashSparse_no_softmax(X_prime, inputInfo):
               X_prime, 
               inputInfo.num_nodes, 
               X_prime.size(1), 
-              inputInfo.num_nodes_ori)[0]
-  return h_prime
+              inputInfo.num_nodes_ori)
+  total_time = sddmm_time + spmm_time
+  return total_time, h_prime
 
 def flashSparse_naive_softmax(X_prime, inputInfo):
-  att = FS_SDDMM.forward_gen_fp16_gnn(   
+  sddmm_time, att = FS_SDDMM.forward_gen_fp16_gnn(   
               X_prime.size(1),                                      
               inputInfo.row_pointers, 
               inputInfo.column_index, 
               inputInfo.degrees, 
               inputInfo.t_window_rowTensor,
-              X_prime,X_prime,inputInfo.max)[0] 
+              X_prime,X_prime,inputInfo.max)
+  start_event = torch.cuda.Event(enable_timing=True)
+  end_event = torch.cuda.Event(enable_timing=True)
+  start_event.record()
   att = torch.exp(att) # softmax
-  rows_sum = FS_SpMM.forward_fp16_gnn_ones(   
+  end_event.record()
+  end_event.synchronize()
+  softmax_time = start_event.elapsed_time(end_event)
+  spmm_ones_time, rows_sum = FS_SpMM.forward_fp16_gnn_ones(   
               inputInfo.row_pointers, 
               inputInfo.column_index, 
               att, 
@@ -83,8 +131,8 @@ def flashSparse_naive_softmax(X_prime, inputInfo):
               inputInfo.ones, 
               inputInfo.num_nodes, 
               inputInfo.ones.size(1), 
-              inputInfo.num_nodes_ori)[0]
-  h_prime = FS_SpMM.forward_fp16_gnn(   
+              inputInfo.num_nodes_ori)
+  spmm_time, h_prime = FS_SpMM.forward_fp16_gnn(   
               inputInfo.row_pointers, 
               inputInfo.column_index, 
               att, 
@@ -93,19 +141,33 @@ def flashSparse_naive_softmax(X_prime, inputInfo):
               X_prime, 
               inputInfo.num_nodes, 
               X_prime.size(1), 
-              inputInfo.num_nodes_ori)[0].half()
+              inputInfo.num_nodes_ori)
+  start_event = torch.cuda.Event(enable_timing=True)
+  end_event = torch.cuda.Event(enable_timing=True)
+  start_event.record()
   h_prime = h_prime.div(rows_sum) # softmax
+  end_event.record()
+  end_event.synchronize()
+  softmax_time += start_event.elapsed_time(end_event)
+  total_time = sddmm_time + spmm_ones_time + spmm_time + softmax_time
+  return total_time, h_prime
 
 def flashSparse_stable_softmax(X_prime, inputInfo, edge_att_rand):
-  att = FS_SDDMM.forward_gen_fp16_gnn(   
+  sddmm_time, att = FS_SDDMM.forward_gen_fp16_gnn(   
               X_prime.size(1),                                      
               inputInfo.row_pointers, 
               inputInfo.column_index, 
               inputInfo.degrees, 
               inputInfo.t_window_rowTensor,
-              X_prime,X_prime,inputInfo.max)[0]
+              X_prime,X_prime,inputInfo.max)
+  start_event = torch.cuda.Event(enable_timing=True)
+  end_event = torch.cuda.Event(enable_timing=True)
+  start_event.record()
   softmax(edge_att_rand, ptr=inputInfo.orig_row_pointers.to('cuda'))
-  h_prime = FS_SpMM.forward_fp16_gnn(   
+  end_event.record()
+  end_event.synchronize()
+  softmax_time = start_event.elapsed_time(end_event)
+  spmm_time, h_prime = FS_SpMM.forward_fp16_gnn(   
               inputInfo.row_pointers, 
               inputInfo.column_index, 
               att, 
@@ -114,49 +176,49 @@ def flashSparse_stable_softmax(X_prime, inputInfo, edge_att_rand):
               X_prime, 
               inputInfo.num_nodes, 
               X_prime.size(1), 
-              inputInfo.num_nodes_ori)[0].half()
-
-def route_flashSparse(args, inputInfo, Q):
+              inputInfo.num_nodes_ori)
+  total_time = sddmm_time + softmax_time + spmm_time
+  return total_time, h_prime
+  
+def route_flashSparse(args, inputInfo, Q, perf):
   if args.use_cuda_event:
-    no_softmax = timing_decorator(flashSparse_no_softmax)
-    naive_softmax = timing_decorator(flashSparse_naive_softmax)
-    stable_softmax = timing_decorator(flashSparse_stable_softmax)
+    no_softmax = timing_decorator(flashSparse_no_softmax, inputInfo, perf)
+    naive_softmax = timing_decorator(flashSparse_naive_softmax, inputInfo, perf)
+    stable_softmax = timing_decorator(flashSparse_stable_softmax, inputInfo, perf)
   else:
     no_softmax = flashSparse_no_softmax
     naive_softmax = flashSparse_naive_softmax
     stable_softmax = flashSparse_stable_softmax
-  if(args.alg == "fs_no_softmax"):
+  if args.alg == "flashSparse_no_softmax" or args.alg == "all":
     no_softmax(Q, inputInfo)
-  elif(args.alg == "fs_naive_softmax"):
+  if args.alg == "flashSparse_naive_softmax" or args.alg == "all":
     naive_softmax(Q, inputInfo)
-  elif(args.alg == "fs_stable_softmax"):
+  if args.alg == "flashSparse_stable_softmax" or args.alg == "all":
     edge_att_rand = torch.rand(inputInfo.num_edges, dtype=torch.float16, device=args.dev)
+    print(f"inputInfo.num_edges: {inputInfo.num_edges}, inputInfo.num_nodes: {inputInfo.num_nodes}, inputInfo.max: {inputInfo.max}")
     stable_softmax(Q, inputInfo, edge_att_rand)
-  else:
-    raise ValueError(f"Invalid algorithm: {args.alg}")
 
-def flashSparse_preprocess_dataset(args, orig_row_pointers, orig_column_index, num_nodes, num_edges):
+def flashSparse_preprocess_dataset(args, graphInfo):
   partSize = 32
   window = 8
   wide = 16
   inputInfo = InputInfo()
-  print("starting blockProcess_sddmm_balance_gnn")
-  inputInfo.orig_row_pointers = orig_row_pointers
+  inputInfo.name = graphInfo.name
+  inputInfo.orig_row_pointers = graphInfo.row_pointers
   inputInfo.row_pointers, inputInfo.column_index, \
   inputInfo.degrees, inputInfo.t_window_rowTensor, \
-  inputInfo.t_atomicTensor = FS_Block.blockProcess_sddmm_balance_gnn(orig_row_pointers.cpu(), orig_column_index.cpu(), window, wide, partSize)
+  inputInfo.t_atomicTensor = FS_Block.blockProcess_sddmm_balance_gnn(graphInfo.row_pointers.cpu(), graphInfo.column_index.cpu(), window, wide, partSize)
   inputInfo.row_pointers = inputInfo.row_pointers.cuda()
   inputInfo.column_index = inputInfo.column_index.cuda()
   inputInfo.degrees = inputInfo.degrees.cuda()
   inputInfo.t_window_rowTensor = inputInfo.t_window_rowTensor.cuda()
   inputInfo.t_atomicTensor = inputInfo.t_atomicTensor.cuda()
-  print("finished blockProcess_sddmm_balance_gnn")
-  inputInfo.num_nodes_ori = num_nodes
-  if num_nodes%16 !=0 :
-    inputInfo.num_nodes = num_nodes + 16 - num_nodes%16
+  inputInfo.num_nodes_ori = graphInfo.num_nodes
+  if graphInfo.num_nodes%16 !=0 :
+    inputInfo.num_nodes = graphInfo.num_nodes + 16 - graphInfo.num_nodes%16
   else:
-    inputInfo.num_nodes = num_nodes
-  inputInfo.num_edges = num_edges
+    inputInfo.num_nodes = graphInfo.num_nodes
+  inputInfo.num_edges = graphInfo.num_edges
   inputInfo.ones = torch.ones((inputInfo.num_nodes_ori,1), dtype=torch.float16, device=args.dev)
   max_vectors = torch.max(inputInfo.row_pointers[1:]- inputInfo.row_pointers[:-1])
   if max_vectors%wide > 0 :
@@ -167,111 +229,109 @@ def flashSparse_preprocess_dataset(args, orig_row_pointers, orig_column_index, n
       inputInfo.max += 4 - inputInfo.max%4
   return inputInfo
 
-def route_f3s(args, sparse_rep, Q, K, V, num_nodes):
+def route_f3s(args, graphInfo, Q, K, V, perf):
   import TCFMM
   if args.use_cuda_event:
-    f3s_1tb1rw = timing_decorator(TCFMM.f3s_1tb1rw)
-    f3s_1tb1rw_scheduled= timing_decorator(TCFMM.f3s_1tb1rw_scheduled)
-    f3s_1tb1tcb = timing_decorator(TCFMM.f3s_1tb1tcb)
+    f3s_1tb1rw = timing_decorator(TCFMM.f3s_1tb1rw, graphInfo, perf)
+    f3s_1tb1rw_scheduled= timing_decorator(TCFMM.f3s_1tb1rw_scheduled, graphInfo, perf)
+    f3s_1tb1rw_scheduled_permuteV = timing_decorator(TCFMM.f3s_1tb1rw_scheduled_permuteV, graphInfo, perf)
+    f3s_1tb1tcb = timing_decorator(TCFMM.f3s_1tb1tcb, graphInfo, perf)
   else:
     f3s_1tb1rw = TCFMM.f3s_1tb1rw
     f3s_1tb1rw_scheduled = TCFMM.f3s_1tb1rw_scheduled
+    f3s_1tb1rw_scheduled_permuteV = TCFMM.f3s_1tb1rw_scheduled_permuteV
     f3s_1tb1tcb = TCFMM.f3s_1tb1tcb
-  RowWindowOffset, sortedRowWindows, TCblockRowid,\
-  TCblocktileId, TCblockoffset, SparseAToXindex,\
-  TBBoundaries, TCblockBitMap, block_count = sparse_rep
-  if args.alg == 'f3s_1tb1rw':
-    final_result, sddmm_result_1tb1rw = f3s_1tb1rw(
-      RowWindowOffset, SparseAToXindex, TCblockBitMap, 
-      num_nodes, Q, K, V, args.n_warp_per_block, True)
-  elif args.alg == 'f3s_1tb1rw_no_softmax':
-    final_result, sddmm_result_1tb1rw = f3s_1tb1rw(
-      RowWindowOffset, SparseAToXindex, TCblockBitMap, 
-      num_nodes, Q, K, V, args.n_warp_per_block, False)
-  elif args.alg == 'f3s_1tb1rw_scheduled':
-    final_result, sddmm_result_1tb1rw_scheduled = f3s_1tb1rw_scheduled(
-      RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
-      num_nodes, Q, K, V, args.n_warp_per_block, False)
-  elif args.alg == 'f3s_1tb1rw_scheduled_permuteV':
-    final_result, sddmm_result_1tb1rw_scheduled = f3s_1tb1rw_scheduled(
-      RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
-      num_nodes, Q, K, V, args.n_warp_per_block, True)
-  elif args.alg == 'f3s_1tb1tcb':
+
+  if args.alg == 'f3s_1tb1tcb' or args.alg == 'all':
+    RowWindowOffset, sortedRowWindows, TCblockRowid,\
+    TCblocktileId, TCblockoffset, SparseAToXindex,\
+    TBBoundaries, TCblockBitMap, block_count = f3s_preprocess_dataset(args, graphInfo, BLK_W=8)
+    print("f3s_1tb1tcb")
     apply_softmax = True
     save_sddmm_result = False
-    final_result, sddmm_result_1tb1tcb = f3s_1tb1tcb(
+    f3s_1tb1tcb(
       RowWindowOffset, SparseAToXindex, TCblockBitMap, 
-      num_nodes, Q, K, V, apply_softmax, save_sddmm_result)
-  else:
-    raise ValueError(f"Invalid algorithm: {args.alg}")
+      graphInfo.num_nodes, Q, K, V, apply_softmax, save_sddmm_result)
+    
+  RowWindowOffset, sortedRowWindows, TCblockRowid,\
+  TCblocktileId, TCblockoffset, SparseAToXindex,\
+  TBBoundaries, TCblockBitMap, block_count = f3s_preprocess_dataset(args, graphInfo, BLK_W=16)
+  if args.alg == 'f3s_1tb1rw' or args.alg == 'all':
+    print("f3s_1tb1rw")
+    f3s_1tb1rw(
+      RowWindowOffset, SparseAToXindex, TCblockBitMap, 
+      graphInfo.num_nodes, Q, K, V, args.n_warp_per_block, True)
+  if args.alg == 'f3s_1tb1rw_scheduled' or args.alg == 'all':
+    print("f3s_1tb1rw_scheduled")
+    f3s_1tb1rw_scheduled(
+      RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
+      graphInfo.num_nodes, Q, K, V, args.n_warp_per_block)
+  if args.alg == 'f3s_1tb1rw_scheduled_permuteV' or args.alg == 'all':
+    print("f3s_1tb1rw_scheduled_permuteV")
+    f3s_1tb1rw_scheduled_permuteV(
+      RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
+      graphInfo.num_nodes, Q, K, V, args.n_warp_per_block)
 
-def f3s_preprocess_dataset(args, indptr, indices, num_nodes, num_edges):
+def f3s_preprocess_dataset(args, graphInfo, BLK_W):
   from TCFMM import preprocess_gpu
   BLK_H = 16
-  if args.alg == 'f3s_1tb1rw' or args.alg == 'f3s_1tb1rw_scheduled':
-    BLK_W = 16
-  else:
-    BLK_W = 8
   # Set up tensors for preprocessing
-  num_row_windows = (num_nodes + BLK_H - 1) // BLK_H
+  num_row_windows = (graphInfo.num_nodes + BLK_H - 1) // BLK_H
   # Move tensors to GPU
   blockPartition_cuda = torch.zeros(num_row_windows, dtype=torch.int).cuda()
-  edgeToColumn_cuda = torch.zeros(num_edges, dtype=torch.int).cuda()
-  edgeToRow_cuda = torch.zeros(num_edges, dtype=torch.int).cuda()
-  return preprocess_gpu(indices, indptr, num_nodes, 
-                              BLK_H, BLK_W, blockPartition_cuda, 
-                              edgeToColumn_cuda, edgeToRow_cuda)
+  edgeToColumn_cuda = torch.zeros(graphInfo.num_edges, dtype=torch.int).cuda()
+  edgeToRow_cuda = torch.zeros(graphInfo.num_edges, dtype=torch.int).cuda()
+  return preprocess_gpu(graphInfo.column_index, graphInfo.row_pointers, graphInfo.num_nodes, 
+                        BLK_H, BLK_W, blockPartition_cuda, 
+                        edgeToColumn_cuda, edgeToRow_cuda)
 
-def route_dfgnn(args, row_pointers, column_index, rows, smem_consume, val, Q, K, V):
+def route_dfgnn(args, graphInfo, Q, K, V, perf):
   from DFGNN.operators.fused_gtconv import GTConvFuse_inference_tiling, GTConvFuse_inference_hyper
   if args.use_cuda_event:
-    dfgnn_tiling = timing_decorator(GTConvFuse_inference_tiling)
-    dfgnn_hyper = timing_decorator(GTConvFuse_inference_hyper)
+    dfgnn_tiling = event_timing_decorator(GTConvFuse_inference_tiling, graphInfo, perf)
+    dfgnn_hyper = event_timing_decorator(GTConvFuse_inference_hyper, graphInfo, perf)
   else:
     dfgnn_tiling = GTConvFuse_inference_tiling
     dfgnn_hyper = GTConvFuse_inference_hyper
-  if args.alg == "dfgnn_tiling":
-    out = dfgnn_tiling(row_pointers, column_index, val, smem_consume, Q, K, V)
-  elif args.alg == "dfgnn_hyper":
-    out = dfgnn_hyper(row_pointers, column_index, rows, val, smem_consume, Q, K, V)
-  else:
-    raise ValueError(f"Invalid algorithm: {args.alg}")
 
-def dfgnn_preprocess_dataset(args, indices, rows, Q, K, V):
+  if args.alg == "dfgnn_tiling" or args.alg == "all":
+    smem_consume, val, Q, K, V = dfgnn_preprocess_dataset(args, graphInfo, Q, K, V, alg="dfgnn_tiling")
+    out = dfgnn_tiling(graphInfo.row_pointers, graphInfo.column_index, val, smem_consume, Q, K, V)
+  if args.alg == "dfgnn_hyper" or args.alg == "all" and not graphInfo.disable_dfgnn_hyper:
+    smem_consume, val, Q, K, V = dfgnn_preprocess_dataset(args, graphInfo, Q, K, V, alg="dfgnn_hyper")
+    out = dfgnn_hyper(graphInfo.row_pointers, graphInfo.column_index, graphInfo.rows, val, smem_consume, Q, K, V)
+
+def dfgnn_preprocess_dataset(args, graphInfo, Q, K, V, alg):
   # add 1 dimension of 1 to Q, K, V
   Q = Q.unsqueeze(1).float()
   K = K.unsqueeze(1).float()
   V = V.unsqueeze(1).float()
   max_neigh = 128 # according to DF-GNN/DFGNN/layers/util.py
   WARP_SIZE = 32
-  assert len(rows) == len(indices)
-  val = torch.ones(len(rows), dtype=torch.float32, device=args.dev)
-  if args.alg == "dfgnn_tiling":
+  val = torch.ones(graphInfo.num_edges, dtype=torch.float32, device=args.dev)
+  if alg == "dfgnn_tiling":
     smem_consume = (max_neigh + WARP_SIZE - 1) // WARP_SIZE * WARP_SIZE
     return smem_consume, val, Q, K, V
-  elif args.alg == "dfgnn_hyper":
+  elif alg == "dfgnn_hyper":
     smem_consume = (max_neigh * 8 + WARP_SIZE - 1) // WARP_SIZE * WARP_SIZE
     return smem_consume, val, Q, K, V
-  
-def route_methods(args, row_pointers, column_index, rows, num_nodes, num_edges, Q, K, V):
-  # load dataset
-  if args.method == "f3s":
-    sparse_rep = f3s_preprocess_dataset(args, row_pointers, column_index, num_nodes, num_edges)
-    route_f3s(args, sparse_rep, Q, K, V, num_nodes)
-  elif args.method == "flashSparse":
-    # num_features and num_classes are for creating inputInfo.x and .y, which are not used in the kernel
-    inputInfo = flashSparse_preprocess_dataset(args, row_pointers, column_index, num_nodes, num_edges)
-    print(f"inputInfo.num_edges: {inputInfo.num_edges}, inputInfo.num_nodes: {inputInfo.num_nodes}, inputInfo.max: {inputInfo.max}")
-    print(f"inputInfo.row_pointers.device: {inputInfo.row_pointers.device}")
-    route_flashSparse(args, inputInfo, Q)
-  elif args.method == "df-gnn":
-    smem_consume, val, Q, K, V = dfgnn_preprocess_dataset(args, column_index, rows, Q, K, V)
-    route_dfgnn(args, row_pointers, column_index, rows, smem_consume, val, Q, K, V)
   else:
-    raise ValueError(f"Invalid method: {args.method}")
+    raise ValueError(f"Invalid algorithm: {alg}")
+  
+def route_methods(args, graphInfo, Q, K, V, perf):
+  # load dataset
+  if args.method == "f3s" or args.method == "all":
+    route_f3s(args, graphInfo, Q, K, V, perf)
+  if args.method == "flashSparse" or args.method == "all":
+    # num_features and num_classes are for creating inputInfo.x and .y, which are not used in the kernel
+    inputInfo = flashSparse_preprocess_dataset(args, graphInfo)
+    route_flashSparse(args, inputInfo, Q, perf)
+  if args.method == "df-gnn" or args.method == "all":
+    route_dfgnn(args, graphInfo, Q, K, V, perf)
 
-def load_dataset(args):
-  path = f"/share/crsp/lab/amowli/share/Fused3S/dataset/{args.dataset}.npz"
+def load_dataset(dataset_name):
+  print(f"===========loading dataset: {dataset_name}===========")
+  path = f"/share/crsp/lab/amowli/share/Fused3S/dataset/{dataset_name}.npz"
   dataset = np.load(path)
   src_li = dataset['src_li'] # this can contain duplicate edges
   dst_li = dataset['dst_li']
@@ -283,20 +343,42 @@ def load_dataset(args):
   column_index = torch.IntTensor(adj.indices).cuda()
   num_nodes = dataset['num_nodes']
   num_edges = column_index.shape[0]
-  # row indices of all non-zero elements in the adjacency matrix, required by dfgnn
-  row_indices = np.repeat(np.arange(adj.shape[0]), np.diff(adj.indptr))
+  # row indices of all non-zero elements in the adjacency matrix, required by dfgn
+  # A = dglsp.spmatrix(torch.tensor(edge_index), shape=(num_nodes, num_nodes))
+  # rows = A.row.int().cuda()
+  # rows = torch.sort(rows).values
+  row_nnz = np.diff(adj.indptr)
+  disable_dfgnn_hyper = False
+  if np.max(row_nnz) > 128:
+    print(f"max row_nnz: {np.max(row_nnz)} greater than 128, dfgnn_hyper is disabled")
+    disable_dfgnn_hyper = True
+  row_indices = np.repeat(np.arange(adj.shape[0]), row_nnz)
   rows = torch.IntTensor(row_indices).cuda()
-  return row_pointers, column_index, rows, num_nodes, num_edges
+  # assert torch.all(rows == rows_alt), "rows_alt is different from rows"
+  graphInfo = GraphInfo(dataset_name, row_pointers, column_index, rows, num_nodes, num_edges, disable_dfgnn_hyper)
+  return graphInfo
 
 def main(args):
   num_heads = 1
   args.dev = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-  row_pointers, column_index, rows, num_nodes, num_edges = load_dataset(args)
-  print(f"dataset: {args.dataset}, num_nodes: {num_nodes}, num_edges: {num_edges}")
-  Q = torch.rand(num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
-  K = torch.rand(num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
-  V = torch.rand(num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
-  route_methods(args, row_pointers, column_index, rows, num_nodes, num_edges, Q, K, V)
+  if args.dataset != "all":
+    test_dataset = [args.dataset]
+  else:
+    test_dataset = datasets
+  if args.method == "all":
+    test_algs = algs
+  else:
+    test_algs = [args.method]
+  perf = Perf(test_algs, test_dataset)
+  for dataset in test_dataset:
+    graphInfo = load_dataset(dataset)
+    print(f"dataset: {dataset}, num_nodes: {graphInfo.num_nodes}, num_edges: {graphInfo.num_edges}")
+    Q = torch.rand(graphInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
+    K = torch.rand(graphInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
+    V = torch.rand(graphInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
+    route_methods(args, graphInfo, Q, K, V, perf)
+  print(perf.pd)
+  perf.pd.to_csv(f"baseline_comp_kernel_only_{args.method}_{args.alg}.csv")
   
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -305,14 +387,11 @@ if __name__ == "__main__":
     parser.add_argument('--n_warp_per_block', '-nw', type=int, default=8,
                        help='Number of warps per block')
     parser.add_argument('--dataset', '-d', type=str, default="reddit",
-                       choices=["reddit", "ppa", "protein", "cora", "pubmed"])
+                       choices=datasets + ["all"])
     parser.add_argument('--method', '-m', type=str, default="f3s",
-                       choices=["f3s", "flashSparse", "df-gnn"])
+                       choices=["f3s", "flashSparse", "df-gnn", "all"])
     parser.add_argument("--alg", '-a', type=str, default='f3s_1tb1rw_scheduled', 
-                        choices=['f3s_1tb1tcb', 'f3s_1tb1rw', 'f3s_1tb1rw_no_softmax', 
-                                 'f3s_1tb1rw_scheduled', 'f3s_1tb1rw_scheduled_permuteV',
-                                 'fs_no_softmax', 'fs_naive_softmax', 'fs_stable_softmax', 
-                                 'dfgnn_tiling', 'dfgnn_hyper'])
+                        choices= algs + ['all'])
     parser.add_argument("--use_cuda_event", action='store_true', 
                         help='Use CUDA event to measure time, no timer is used otherwise')
     args = parser.parse_args()

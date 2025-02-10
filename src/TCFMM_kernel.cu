@@ -290,12 +290,19 @@ f3sCuda1tb1tcb(
   auto output = torch::zeros({paddedLength, embeddingDim}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
   dim3 grid(nRowWindow, 1, 1);
   dim3 block(WARP_SIZE, nWarpPerBlock, 1);
-  int nTcb = sparseAToXidx.size(0)/BLK_N;
-	torch::Tensor sddmmResult = torch::zeros({nTcb*BLK_M*BLK_N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  uint64_t nTcb = sparseAToXidx.size(0)/BLK_N;
+  //prevent overflow
+  int64_t sddmmResultSize = nTcb*BLK_M*BLK_N;
+	torch::Tensor sddmmResult = torch::zeros({sddmmResultSize}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
   float* sddmmResultPtr = saveSddmmResult ? sddmmResult.data_ptr<float>() : nullptr;
   int fixedSharedSize = nWarpPerBlock * BLK_M * BLK_M * sizeof(float);
   int dynamicSharedSize = applySoftmax ? fixedSharedSize + 2 * BLK_M * sizeof(float) : fixedSharedSize;
+  torch::Tensor time;
   #if BLK_M == 16 && BLK_N == 8 && BLK_K == 16
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+  cudaEventRecord(start, 0);
   f3sKernel1tb1tcb<<<grid, block, dynamicSharedSize>>>(
     rowWindowOffset.data_ptr<int>(), 
     sparseAToXidx.data_ptr<int>(),
@@ -307,6 +314,11 @@ f3sCuda1tb1tcb(
     output.data_ptr<float>(),
     sddmmResultPtr,
     applySoftmax);
+  cudaEventRecord(stop, 0);
+  cudaEventSynchronize(stop);
+  float milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  time = torch::tensor(milliseconds, torch::TensorOptions().dtype(torch::kFloat32));
   #else
   printf("only m16n8k16 is supported\n");
   #endif
@@ -322,7 +334,7 @@ f3sCuda1tb1tcb(
   // remove padding
   output = output.index(
       {torch::indexing::Slice(0, numNodes), torch::indexing::Slice()});
-  return {output, sddmmResult};
+  return {time, output, sddmmResult};
 }
 
 std::vector<torch::Tensor> 
@@ -335,8 +347,9 @@ f3sCuda1tb1rw(
     torch::Tensor Q, torch::Tensor K, torch::Tensor V,
     int nWarpPerBlock,
     bool applySoftmax){
-  int nTcb = sparseAToXidx.size(0)/BLK_M;
-  torch::Tensor sddmmResult = torch::zeros({nTcb*BLK_M*BLK_M}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)); 
+  uint64_t nTcb = sparseAToXidx.size(0)/BLK_M;
+  int64_t sddmmResultSize = nTcb*BLK_M*BLK_M;
+	torch::Tensor sddmmResult = torch::zeros({sddmmResultSize}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
   int nRowWindow = rowWindowOffset.size(0) - 1;
   int paddedLength = nRowWindow * BLK_M; 
   auto output = torch::zeros({paddedLength, embeddingDim}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
@@ -344,9 +357,12 @@ f3sCuda1tb1rw(
   sharedSize += nWarpPerBlock * BLK_M * BLK_N * sizeof(half); // E
   sharedSize += nWarpPerBlock * 2 * BLK_M * sizeof(float); // row_max, row_sum, old_max, old_sum
   sharedSize += BLK_M * embeddingDim * sizeof(float); // O_frag
-  printf("sharedSize: %d\n", sharedSize);
   dim3 grid(nRowWindow, 1, 1);
   dim3 block(WARP_SIZE, nWarpPerBlock, 1);
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+  cudaEventRecord(start, 0);
   if(applySoftmax){
     f3sKernel1tb1rw<<<grid, block, sharedSize>>>(
       rowWindowOffset.data_ptr<int>(), 
@@ -371,7 +387,11 @@ f3sCuda1tb1rw(
       reinterpret_cast<float2*>(output.data_ptr<float>()),
       reinterpret_cast<float2*>(sddmmResult.data_ptr<float>()));
   }
-  cudaDeviceSynchronize();
+  cudaEventRecord(stop, 0);
+  cudaEventSynchronize(stop);
+  float milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  torch::Tensor time = torch::tensor(milliseconds, torch::TensorOptions().dtype(torch::kFloat32));
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
     printf("CUDA error: %s\n", cudaGetErrorString(error));
@@ -380,7 +400,7 @@ f3sCuda1tb1rw(
   // remove padding
   output = output.index(
       {torch::indexing::Slice(0, nNodes), torch::indexing::Slice()});
-  return {output, sddmmResult};
+  return {time, output, sddmmResult};
 }
 
 std::vector<torch::Tensor> 
@@ -394,8 +414,9 @@ f3sCuda1tb1rwScheduled(
     torch::Tensor Q, torch::Tensor K, torch::Tensor V,
     int nWarpPerBlock,
     bool permuteV){
-  int nTcb = sparseAToXidx.size(0)/BLK_M;
-  torch::Tensor sddmmResult = torch::zeros({nTcb*BLK_M*BLK_M}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)); 
+  uint64_t nTcb = sparseAToXidx.size(0)/BLK_M;
+  int64_t sddmmResultSize = nTcb*BLK_M*BLK_M;
+	torch::Tensor sddmmResult = torch::zeros({sddmmResultSize}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)); 
   int nRowWindow = rowWindowOffset.size(0) - 1;
   int paddedLength = nRowWindow * BLK_M; 
   auto output = torch::zeros({paddedLength, embeddingDim}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
@@ -404,9 +425,14 @@ f3sCuda1tb1rwScheduled(
   sharedSize += nWarpPerBlock * 2 * BLK_M * sizeof(float); // row_max, row_sum, old_max, old_sum
   sharedSize += BLK_M * embeddingDim * sizeof(float); // O_frag
   // sharedSize += nWarpPerBlock * 2 * BLK_K * BLK_N * sizeof(half); // V double buffer
-  printf("sharedSize: %d\n", sharedSize);
+  // printf("sharedSize: %d\n", sharedSize);
   dim3 grid(nRowWindow, 1, 1);
   dim3 block(WARP_SIZE, nWarpPerBlock, 1);
+  // create cuda event
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+  cudaEventRecord(start, 0);
   if(permuteV){
     f3sKernel1tb1rwScheduledPermutedV<<<grid, block, sharedSize>>>(
       rowWindowOffset.data_ptr<int>(), 
@@ -435,7 +461,12 @@ f3sCuda1tb1rwScheduled(
       reinterpret_cast<float2*>(output.data_ptr<float>()),
       reinterpret_cast<float2*>(sddmmResult.data_ptr<float>()));
   }
-  cudaDeviceSynchronize();
+  cudaEventRecord(stop, 0);
+  cudaEventSynchronize(stop);
+  float milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  torch::Tensor time = torch::tensor(milliseconds, torch::TensorOptions().dtype(torch::kFloat32));
+  // cudaDeviceSynchronize();
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
     printf("CUDA error: %s\n", cudaGetErrorString(error));
@@ -444,7 +475,7 @@ f3sCuda1tb1rwScheduled(
   // remove padding
   output = output.index(
       {torch::indexing::Slice(0, nNodes), torch::indexing::Slice()});
-  return {output, sddmmResult};
+  return {time, output, sddmmResult};
 }
 
 std::vector<torch::Tensor> 
@@ -459,8 +490,9 @@ sddmmCuda1tbnrw(
     torch::Tensor Q, torch::Tensor K,
     int nWarpPerBlock){
   int nRowWindow = tbBoundaries.size(0) - 1;
-  int nTcb = sparseAToXidx.size(0)/BLK_N;
-  torch::Tensor sddmmResult = torch::zeros({nTcb*BLK_M*BLK_N}, 
+  int64_t nTcb = sparseAToXidx.size(0)/BLK_N;
+  int64_t sddmmResultSize = nTcb*BLK_M*BLK_N;
+	torch::Tensor sddmmResult = torch::zeros({sddmmResultSize}, 
     torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));  
   dim3 grid(nRowWindow, 1, 1);
   dim3 block(WARP_SIZE, nWarpPerBlock, 1);

@@ -197,32 +197,30 @@ def main(args):
                                                                     blockPartition_cuda, 
                                                                     edgeToColumn_cuda, 
                                                                     edgeToRow_cuda)
-    start_time = time.time()
     for i in range(n_runs):
       if args.alg == '1tb1rw':
-        fusedR, sddmm_result = TCFMM.f3s_1tb1rw(RowWindowOffset, SparseAToXindex, TCblockBitMap, 
+        time, fusedR, sddmm_result = TCFMM.f3s_1tb1rw(RowWindowOffset, SparseAToXindex, TCblockBitMap, 
                                                 size, Q_half, K_half, V_half, nWarpPerBlock, apply_softmax)
       elif args.alg == '1tb1rw_scheduled':
         print("using 1tb1rw_scheduled")
-        fusedR, sddmm_result = TCFMM.f3s_1tb1rw_scheduled(RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
-                                                          size, Q_half, K_half, V_half, nWarpPerBlock, False)
+        time, fusedR, sddmm_result = TCFMM.f3s_1tb1rw_scheduled(RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
+                                                          size, Q_half, K_half, V_half, nWarpPerBlock)
       elif args.alg == '1tb1rw_scheduled_permuteV':
         print("using 1tb1rw_scheduled_permuteV")
-        fusedR, sddmm_result = TCFMM.f3s_1tb1rw_scheduled(RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
-                                                          size, Q_half, K_half, V_half, nWarpPerBlock, True)
+        time, fusedR, sddmm_result = TCFMM.f3s_1tb1rw_scheduled_permuteV(RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
+                                                          size, Q_half, K_half, V_half, nWarpPerBlock)
       elif args.alg == '1tbnrw':
         print("using 1tbnrw")
-        sddmm_result = TCFMM.sddmm_1tbnrw(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, 
+        time, sddmm_result = TCFMM.sddmm_1tbnrw(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, 
                                           size, Q_half, K_half, nWarpPerBlock)[0]
         fusedR = None
       elif args.alg == '1tb1tcb':
         print("using 1tb1tcb")
-        fusedR, sddmm_result = TCFMM.f3s_1tb1tcb(RowWindowOffset, SparseAToXindex, TCblockBitMap, 
+        time, fusedR, sddmm_result = TCFMM.f3s_1tb1tcb(RowWindowOffset, SparseAToXindex, TCblockBitMap, 
                                                  size, Q_half, K_half, V_half, apply_softmax, save_sddmm_result)
       else:
         raise ValueError(f"Invalid algorithm: {args.alg}")
-    f3s_time = (time.time() - start_time)/n_runs
-    print(f"f3s_time: {f3s_time}")
+    print(f"f3s_time: {time.item()} ms")
     # Print full SDDMM result without truncation
     rel_err = torch.norm(sddmm_result - sddmm_true) / sddmm_true_norm
     f3s_v_true_fp32_sddmm.append(rel_err.item())
