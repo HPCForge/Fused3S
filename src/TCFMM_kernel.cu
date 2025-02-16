@@ -16,6 +16,68 @@
 
 using namespace nvcuda;
 
+typedef uint64_t clocktype;
+struct Dur {
+  clocktype begin;
+  clocktype end;
+  int smid = -1;
+  Dur(clocktype x, clocktype y, int outsm) {
+    begin = x;
+    end = y;
+    smid = outsm;
+  }
+};
+
+bool cmp(Dur x, Dur y) { return (x.end > y.end); }
+
+// gimped version of globalTimer64 from DTC-Spmm because it's adding too much overhead
+static __device__ inline uint64_t globalTimer64(void) {
+  volatile uint64_t first_reading;
+  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(first_reading));
+  return first_reading;
+}
+
+__device__ inline uint getSMId() {
+  uint smid;
+  asm("mov.u32 %0, %smid;" : "=r"(smid));
+  return smid;
+}
+
+// timer is a 3 * nRowWindow array in GPU memory
+void printSMTime(clocktype* timer, int nRowWindow, std::string filename){
+  clocktype* cpu_timer = new clocktype[3 * nRowWindow];
+  memset(cpu_timer, 0, 3 * nRowWindow * sizeof(clocktype));
+  cudaMemcpy(cpu_timer, timer, sizeof(clocktype) * 3 * nRowWindow, cudaMemcpyDeviceToHost);
+  std::vector<Dur> v;
+  for(int j = 0; j < nRowWindow; ++j) {
+    v.push_back(Dur(cpu_timer[j * 3], cpu_timer[j * 3 + 1], (int)(cpu_timer[j * 3 + 2])));
+  }
+  clocktype* start_time_sm = new clocktype[NUM_SM_GPU];
+	for (int i = 0; i < NUM_SM_GPU; i++) {
+		start_time_sm[i] = LONG_LONG_MAX;
+	}
+	clocktype* end_time_sm = new clocktype[NUM_SM_GPU];
+	for (int i = 0; i < NUM_SM_GPU; i++) {
+		end_time_sm[i] = 0;
+	}
+	for(auto item : v) {
+    if (item.begin < start_time_sm[item.smid]) {
+		  start_time_sm[item.smid] = item.begin;
+	  }
+	  if (item.end > end_time_sm[item.smid]) {
+		  end_time_sm[item.smid] = item.end;
+	  }
+	}
+	std::ofstream out(filename);
+	if (out.is_open()) {
+    out << std::fixed << std::setprecision(15);
+	  for (int i = 0; i < NUM_SM_GPU; i++) {
+      out << (double)(start_time_sm[i])/1e6 << " " << (double)(end_time_sm[i])/1e6 << std::endl;
+	  }
+  }
+	out.close();
+}
+
 union Half2Uint32 {
     half2 h2;
     uint32_t u32;
@@ -225,6 +287,18 @@ __global__ void f3sKernel1tb1rw(
     float2 *output,
     float2 *sddmmResult);
 
+__global__ void f3sKernel1tb1rwClocked(
+    const int *__restrict__ rowWindowOffset,
+    const int *__restrict__ sparseAToXidx, 
+    const uint64_t *__restrict__ tcbBitMap,
+    int embeddingDim,
+    ulonglong2 *__restrict__ Q, 
+    ulonglong2 *__restrict__ K,
+    half *__restrict__ V,
+    float2 *output,
+    float2 *sddmmResult,
+    clocktype* timer);
+
 __global__ void f3sKernel1tb1rwScheduled(
     const int *__restrict__ rowWindowOffset,
     const int *__restrict__ sortedRowWindows,
@@ -237,6 +311,20 @@ __global__ void f3sKernel1tb1rwScheduled(
     half *__restrict__ V,
     float2 *output,
     float2 *sddmmResult);
+
+__global__ void f3sKernel1tb1rwScheduledClocked(
+  const int *__restrict__ rowWindowOffset,
+  const int *__restrict__ sortedRowWindows,
+  const int *__restrict__ sparseAToXidx, 
+  const uint64_t *__restrict__ tcbBitMap,
+  int embeddingDim,
+  int nRw,
+  ulonglong2 *__restrict__ Q, 
+  ulonglong2 *__restrict__ K, 
+  half *__restrict__ V,
+  float2 *output,
+  float2 *sddmmResult,
+  clocktype* timer);
 
 __global__ void f3sKernel1tb1rwScheduledPermutedV(
     const int *__restrict__ rowWindowOffset,
@@ -290,11 +378,17 @@ f3sCuda1tb1tcb(
   auto output = torch::zeros({paddedLength, embeddingDim}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
   dim3 grid(nRowWindow, 1, 1);
   dim3 block(WARP_SIZE, nWarpPerBlock, 1);
-  uint64_t nTcb = sparseAToXidx.size(0)/BLK_N;
   //prevent overflow
-  int64_t sddmmResultSize = nTcb*BLK_M*BLK_N;
-	torch::Tensor sddmmResult = torch::zeros({sddmmResultSize}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-  float* sddmmResultPtr = saveSddmmResult ? sddmmResult.data_ptr<float>() : nullptr;
+  torch::Tensor sddmmResult;
+  if(saveSddmmResult){
+    uint64_t nTcb = sparseAToXidx.size(0)/BLK_N;
+    int64_t sddmmResultSize = nTcb*BLK_M*BLK_N;
+    sddmmResult = torch::zeros({sddmmResultSize}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  }
+  else{
+    sddmmResult = torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  }
+  float* sddmmResultPtr = sddmmResult.data_ptr<float>();
   int fixedSharedSize = nWarpPerBlock * BLK_M * BLK_M * sizeof(float);
   int dynamicSharedSize = applySoftmax ? fixedSharedSize + 2 * BLK_M * sizeof(float) : fixedSharedSize;
   torch::Tensor time;
@@ -348,8 +442,9 @@ f3sCuda1tb1rw(
     int nWarpPerBlock,
     bool applySoftmax){
   uint64_t nTcb = sparseAToXidx.size(0)/BLK_M;
-  int64_t sddmmResultSize = nTcb*BLK_M*BLK_M;
-	torch::Tensor sddmmResult = torch::zeros({sddmmResultSize}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  // int64_t sddmmResultSize = nTcb*BLK_M*BLK_M;
+	// torch::Tensor sddmmResult = torch::zeros({sddmmResultSize}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  torch::Tensor sddmmResult = torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
   int nRowWindow = rowWindowOffset.size(0) - 1;
   int paddedLength = nRowWindow * BLK_M; 
   auto output = torch::zeros({paddedLength, embeddingDim}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
@@ -404,6 +499,127 @@ f3sCuda1tb1rw(
 }
 
 std::vector<torch::Tensor> 
+f3sCuda1tb1rwClocked(
+    torch::Tensor rowWindowOffset,
+    torch::Tensor sparseAToXidx,
+    torch::Tensor tcbBitMap,
+    int nNodes,
+    int embeddingDim,
+    torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+    int nWarpPerBlock){
+  uint64_t nTcb = sparseAToXidx.size(0)/BLK_M;
+  // int64_t sddmmResultSize = nTcb*BLK_M*BLK_M;
+	// torch::Tensor sddmmResult = torch::zeros({sddmmResultSize}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  torch::Tensor sddmmResult = torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  int nRowWindow = rowWindowOffset.size(0) - 1;
+  int paddedLength = nRowWindow * BLK_M; 
+  auto output = torch::zeros({paddedLength, embeddingDim}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  int sharedSize = BLK_M * embeddingDim * sizeof(half); // Q
+  sharedSize += nWarpPerBlock * BLK_M * BLK_N * sizeof(half); // E
+  sharedSize += nWarpPerBlock * 2 * BLK_M * sizeof(float); // row_max, row_sum, old_max, old_sum
+  sharedSize += BLK_M * embeddingDim * sizeof(float); // O_frag
+  clocktype* timer;
+	cudaMalloc((void**)&timer, sizeof(clocktype) * 3 * nRowWindow);
+	cudaMemset(timer, 0, 3 * nRowWindow * sizeof(clocktype));
+  dim3 grid(nRowWindow, 1, 1);
+  dim3 block(WARP_SIZE, nWarpPerBlock, 1);
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+  cudaEventRecord(start, 0);
+  f3sKernel1tb1rwClocked<<<grid, block, sharedSize>>>(
+    rowWindowOffset.data_ptr<int>(), 
+    sparseAToXidx.data_ptr<int>(),
+    tcbBitMap.data_ptr<uint64_t>(),
+    embeddingDim,
+    reinterpret_cast<ulonglong2*>(Q.data_ptr<torch::Half>()), 
+    reinterpret_cast<ulonglong2*>(K.data_ptr<torch::Half>()), 
+    reinterpret_cast<half*>(V.data_ptr<torch::Half>()),
+    reinterpret_cast<float2*>(output.data_ptr<float>()),
+    reinterpret_cast<float2*>(sddmmResult.data_ptr<float>()),
+    timer);
+  cudaEventRecord(stop, 0);
+  cudaEventSynchronize(stop);
+  float milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  torch::Tensor time = torch::tensor(milliseconds, torch::TensorOptions().dtype(torch::kFloat32));
+  cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    exit(-1);
+  }
+  // remove padding
+  output = output.index(
+      {torch::indexing::Slice(0, nNodes), torch::indexing::Slice()});
+  // print the time of each SM
+  printSMTime(timer, nRowWindow, "SM_time_f3s1tb1rw.csv");
+  return {time, output, sddmmResult};
+}
+
+std::vector<torch::Tensor> 
+f3sCuda1tb1rwScheduledClocked(
+    torch::Tensor rowWindowOffset,
+    torch::Tensor sortedRowWindows,
+    torch::Tensor sparseAToXidx,
+    torch::Tensor tcbBitMap,
+    int nNodes,
+    int embeddingDim,
+    torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+    int nWarpPerBlock){
+  uint64_t nTcb = sparseAToXidx.size(0)/BLK_M;
+  // int64_t sddmmResultSize = nTcb*BLK_M*BLK_M;
+	// torch::Tensor sddmmResult = torch::zeros({sddmmResultSize}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)); 
+  torch::Tensor sddmmResult = torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  float2* sddmmResultPtr = reinterpret_cast<float2*>(sddmmResult.data_ptr<float>());
+  int nRowWindow = rowWindowOffset.size(0) - 1;
+  int paddedLength = nRowWindow * BLK_M; 
+  auto output = torch::zeros({paddedLength, embeddingDim}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  int sharedSize = BLK_M * embeddingDim * sizeof(half); // Q
+  sharedSize += nWarpPerBlock * BLK_M * BLK_N * sizeof(half); // E
+  sharedSize += nWarpPerBlock * 2 * BLK_M * sizeof(float); // row_max, row_sum, old_max, old_sum
+  sharedSize += BLK_M * embeddingDim * sizeof(float); // O_frag
+  clocktype* timer;
+	cudaMalloc((void**)&timer, sizeof(clocktype) * 3 * nRowWindow);
+	cudaMemset(timer, 0, 3 * nRowWindow * sizeof(clocktype));
+  dim3 grid(nRowWindow, 1, 1);
+  dim3 block(WARP_SIZE, nWarpPerBlock, 1);
+  // create cuda event
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+  cudaEventRecord(start, 0);
+  f3sKernel1tb1rwScheduledClocked<<<grid, block, sharedSize>>>(
+    rowWindowOffset.data_ptr<int>(), 
+    sortedRowWindows.data_ptr<int>(), 
+    sparseAToXidx.data_ptr<int>(),
+    tcbBitMap.data_ptr<uint64_t>(),
+    embeddingDim,
+    nRowWindow,
+    reinterpret_cast<ulonglong2*>(Q.data_ptr<torch::Half>()), 
+    reinterpret_cast<ulonglong2*>(K.data_ptr<torch::Half>()), 
+    reinterpret_cast<half*>(V.data_ptr<torch::Half>()),
+    reinterpret_cast<float2*>(output.data_ptr<float>()),
+    sddmmResultPtr,
+    timer);
+  cudaEventRecord(stop, 0);
+  cudaEventSynchronize(stop);
+  float milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  torch::Tensor time = torch::tensor(milliseconds, torch::TensorOptions().dtype(torch::kFloat32));
+  cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    exit(-1);
+  }
+  // remove padding
+  output = output.index(
+      {torch::indexing::Slice(0, nNodes), torch::indexing::Slice()});
+  // print the time of each SM
+  printSMTime(timer, nRowWindow, "SM_time_f3s1tb1rw_scheduled.csv");
+  return {time, output, sddmmResult};
+}
+
+std::vector<torch::Tensor> 
 f3sCuda1tb1rwScheduled(
     torch::Tensor rowWindowOffset,
     torch::Tensor sortedRowWindows,
@@ -415,8 +631,10 @@ f3sCuda1tb1rwScheduled(
     int nWarpPerBlock,
     bool permuteV){
   uint64_t nTcb = sparseAToXidx.size(0)/BLK_M;
-  int64_t sddmmResultSize = nTcb*BLK_M*BLK_M;
-	torch::Tensor sddmmResult = torch::zeros({sddmmResultSize}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)); 
+  // int64_t sddmmResultSize = nTcb*BLK_M*BLK_M;
+	// torch::Tensor sddmmResult = torch::zeros({sddmmResultSize}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)); 
+  torch::Tensor sddmmResult = torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  float2* sddmmResultPtr = reinterpret_cast<float2*>(sddmmResult.data_ptr<float>());
   int nRowWindow = rowWindowOffset.size(0) - 1;
   int paddedLength = nRowWindow * BLK_M; 
   auto output = torch::zeros({paddedLength, embeddingDim}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
@@ -445,7 +663,7 @@ f3sCuda1tb1rwScheduled(
       reinterpret_cast<ulonglong2*>(K.data_ptr<torch::Half>()), 
       reinterpret_cast<half*>(V.data_ptr<torch::Half>()),
       reinterpret_cast<float2*>(output.data_ptr<float>()),
-      reinterpret_cast<float2*>(sddmmResult.data_ptr<float>()));
+      sddmmResultPtr);
   }
   else{
     f3sKernel1tb1rwScheduled<<<grid, block, sharedSize>>>(
@@ -459,7 +677,7 @@ f3sCuda1tb1rwScheduled(
       reinterpret_cast<ulonglong2*>(K.data_ptr<torch::Half>()), 
       reinterpret_cast<half*>(V.data_ptr<torch::Half>()),
       reinterpret_cast<float2*>(output.data_ptr<float>()),
-      reinterpret_cast<float2*>(sddmmResult.data_ptr<float>()));
+      sddmmResultPtr);
   }
   cudaEventRecord(stop, 0);
   cudaEventSynchronize(stop);
@@ -1062,6 +1280,199 @@ __global__ void f3sKernel1tb1rw(
   }
 }
 
+// Each warp computes 1 tcb of S.
+// TODO: right now we need at least 2 warps per block because we need 2 tcbs to go to the spmm stage.
+__global__ void f3sKernel1tb1rwClocked(
+    const int *__restrict__ rowWindowOffset,
+    const int *__restrict__ sparseAToXidx, 
+    const uint64_t *__restrict__ tcbBitMap,
+    int embeddingDim,
+    ulonglong2 *__restrict__ Q, 
+    ulonglong2 *__restrict__ K, 
+    half *__restrict__ V,
+    float2 *output,
+    float2 *sddmmResult,
+    clocktype* timer) {
+  clocktype begin = globalTimer64();
+  volatile int laneId = threadIdx.x;
+  int warpId = threadIdx.y;
+  // contains a RW of Q
+  extern __shared__ __align__(16) uint64_t dynShm1tb1rw[];
+  __shared__ float maxOld[BLK_M];
+  // r_b in Alg 1
+  __shared__ float sumOld[BLK_M];
+  __shared__ float mTilde[BLK_M];
+  {
+    //initialize everything to 0
+    int oOffset = (embeddingDim+blockDim.y*BLK_N)*BLK_M/4 + 2*blockDim.y*BLK_M/2;
+    for(int i = tid; i < oOffset + embeddingDim*BLK_M/2; i += blockDim.x*blockDim.y){
+      dynShm1tb1rw[i] = 0;
+    }
+    for(int i = tid; i < BLK_M; i += blockDim.x*blockDim.y){
+      maxOld[i] = 0.0f;
+      sumOld[i] = 0.0f;
+      mTilde[i] = 0.0f;
+    }
+  }
+  //BLK_M/2 because each thread loads 2 128b elements
+  for(int i = tid; i < (BLK_M/2)*embeddingDim/8; i += blockDim.x*blockDim.y){
+    loadQHbm2Shm128b(dynShm1tb1rw, Q+bid*BLK_M*embeddingDim/8, embeddingDim, i);
+  }
+  __syncthreads();
+
+  int niter = ((rowWindowOffset[bid+1] - rowWindowOffset[bid])*2 + blockDim.y - 1)/blockDim.y;
+  for(int iter = 0; iter < niter; iter++){
+    int iterTcbStart = rowWindowOffset[bid] + iter*blockDim.y/2;
+    // number of 16x16 blocks in S/E being computed in this iteration.
+    int nBlock = min(blockDim.y/2, rowWindowOffset[bid+1]-iterTcbStart);
+    float S_frag[4] = {0.0f};
+    int warpTcbId = warpId/2 + iterTcbStart;
+    if(warpId < nBlock*2){
+      {//sddmm
+        int kOffset = sparseAToXidx[warpTcbId*BLK_M + (warpId%2)*BLK_N + laneId/4] * embeddingDim/8 + laneId % 4;
+        for(int i = 0; i < embeddingDim/BLK_K; i+=2) {
+          //load K with permuted columns
+          ulonglong2 val = K[kOffset + i*BLK_K/8];
+          uint64_t Q_frag[2];
+          loadQFragShm(Q_frag, dynShm1tb1rw, i, laneId);
+          HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
+                    static_cast<uint32_t>(Q_frag[0] & 0xFFFFFFFFull), 
+                    static_cast<uint32_t>(Q_frag[1] & 0xFFFFFFFFull), 
+                    static_cast<uint32_t>(Q_frag[0] >> 32), 
+                    static_cast<uint32_t>(Q_frag[1] >> 32), 
+                    static_cast<uint32_t>(val.x & 0xFFFFFFFFull), 
+                    static_cast<uint32_t>(val.x >> 32), 
+                    S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
+          loadQFragShm(Q_frag, dynShm1tb1rw, i+1, laneId);
+          HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
+                    static_cast<uint32_t>(Q_frag[0] & 0xFFFFFFFFull), 
+                    static_cast<uint32_t>(Q_frag[1] & 0xFFFFFFFFull), 
+                    static_cast<uint32_t>(Q_frag[0] >> 32), 
+                    static_cast<uint32_t>(Q_frag[1] >> 32), 
+                    static_cast<uint32_t>(val.y & 0xFFFFFFFFull), 
+                    static_cast<uint32_t>(val.y >> 32), 
+                    S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
+        }
+        int bitIdx = 63 - laneId*2;
+        for(int i = 0; i < 4; i++){
+          uint64_t bitMask = 1ULL << (bitIdx - i%2);
+          S_frag[i] = (tcbBitMap[warpTcbId*4+(warpId%2)*2+i/2] & bitMask) == 0 ? 0.0f : S_frag[i];
+        }
+      }
+      {//online softmax
+        float* maxPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2 + laneId/4 + blockDim.y*BLK_M;
+        //save max of each row within the warp to shared memory for cross-warp communication
+        for(int i=0; i<2; i++){
+          float localMax = fmaxf(S_frag[i*2], S_frag[i*2+1]);
+          reduceMax(localMax, laneId);
+          if(laneId % 4 == 0){
+            maxPtr[warpId*BLK_M + i*BLK_M/2] = localMax;
+          }
+        }
+      }
+    }
+    __syncthreads();
+    if(warpId < nBlock*2){
+      float* sumPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2;
+      for(int i=0; i<2; i++){
+        int offset = i*BLK_M/2 + laneId/4;
+        float* maxPtr = sumPtr + blockDim.y*BLK_M + offset;
+        float newGlobalMax = maxOld[offset];
+        //we have blockDim.y columns reserved for local sum of each warp
+        //but only nBlock*2 are used
+        for(int j=0; j<nBlock*2; j++){
+          newGlobalMax = fmaxf(maxPtr[j*BLK_M], newGlobalMax);
+        }
+        if(warpId == 0 && laneId % 4 == 0){
+          mTilde[offset] = __expf(maxOld[offset] - newGlobalMax);
+          maxOld[offset] = newGlobalMax;
+        }
+        //compute E, ignore 0s
+        S_frag[i*2] = S_frag[i*2]==0.0f ? 0.0f : __expf(S_frag[i*2] - newGlobalMax);
+        S_frag[i*2+1] = S_frag[i*2+1]==0.0f ? 0.0f : __expf(S_frag[i*2+1] - newGlobalMax);
+        //compute row sum and save to shared memory
+        float localSum = S_frag[i*2] + S_frag[i*2+1];
+        reduceSum(localSum);
+        if(laneId % 4 == 0){
+          sumPtr[warpId*BLK_M + offset] = localSum;
+        }
+      }
+      int eOffset = (embeddingDim + warpId*BLK_N)*BLK_M/2+laneId;
+      storeEFragShm(S_frag, reinterpret_cast<uint32_t*>(dynShm1tb1rw)+eOffset);
+    }
+    __syncthreads();
+    //Could try moving this block to the end of the loop
+    //Without warpId == 0, the compiler gets confused and the long scoreboard stall will increase significantly.
+    if(warpId == 0 && tid < BLK_M){
+      float* sumPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2 + laneId;
+      //update r_b
+      float rowSum = 0.0f;
+      //we have blockDim.y columns reserved for local sum of each warp
+      //but only nBlock*2 are used
+      for(int j=0; j<nBlock*2; j++){
+        rowSum += sumPtr[j*BLK_M];
+      }
+      sumOld[laneId] = fmaf(mTilde[laneId], sumOld[laneId], rowSum);
+    }
+    __syncthreads();
+    {//SpMM
+      int oOffset_base = (embeddingDim+blockDim.y*BLK_N)*BLK_M/2 + 2*blockDim.y*BLK_M + laneId;
+      for(int i=warpId; i<embeddingDim/BLK_N; i+=blockDim.y){
+        int oOffset = oOffset_base + i*BLK_M*BLK_N;
+        float O_frag[4];
+        loadOFragShm(O_frag, reinterpret_cast<float*>(dynShm1tb1rw)+oOffset, mTilde+laneId/4);
+        for(int j=0; j<nBlock; j++){
+          uint32_t E_frag[4];
+          uint32_t B_frag[2];
+          //load E
+          int eOffset = (embeddingDim+j*BLK_M)*BLK_M/2 + laneId;
+          loadEFragShm(E_frag, reinterpret_cast<uint32_t*>(dynShm1tb1rw)+eOffset);
+          //load V
+          int sparseAToXidxOffset = (iterTcbStart+j)*BLK_M + (laneId%4)*2;
+          for(int k = 0; k < 2; k++){
+            sparseAToXidxOffset += k*BLK_N;
+            Half2Uint32 h2U32Converter;
+            int offset = sparseAToXidx[sparseAToXidxOffset]*embeddingDim+ i*BLK_N + laneId/4;
+            h2U32Converter.h2.x = V[offset];
+            offset = sparseAToXidx[sparseAToXidxOffset+1]*embeddingDim+ i*BLK_N + laneId/4;
+            h2U32Converter.h2.y = V[offset];
+            B_frag[k] = h2U32Converter.u32;
+          }
+          HMMA16816(O_frag[0], O_frag[1], O_frag[2], O_frag[3], 
+                    E_frag[0], E_frag[1], E_frag[2], E_frag[3], 
+                    B_frag[0], B_frag[1], 
+                    O_frag[0], O_frag[1], O_frag[2], O_frag[3]);
+        }
+        storeOFragShm(O_frag, reinterpret_cast<float*>(dynShm1tb1rw)+oOffset);
+      }
+    }
+  }
+  __syncthreads();
+  float invR0 = sumOld[laneId/4] == 0.0f ? 0.0f : 1.0f/sumOld[laneId/4];
+  float invR1 = sumOld[BLK_M/2 + laneId/4] == 0.0f ? 0.0f : 1.0f/sumOld[BLK_M/2 + laneId/4];
+  //points to (laneId)th element of O
+  int oOffset = (embeddingDim+blockDim.y*BLK_N)*BLK_M/2 + 2*blockDim.y*BLK_M + laneId;
+  //offset in terms of number of elements,
+  //have to be divided by 2 to get the index of the float2
+  int outputOffset = (bid*BLK_M + laneId/4)*embeddingDim + (laneId%4)*2;
+  for(int i = warpId; i < embeddingDim/BLK_N; i += blockDim.y){
+    int offset = oOffset + i*BLK_M*BLK_N;
+    float* oPtr = reinterpret_cast<float*>(dynShm1tb1rw) + offset;
+    float2 val;
+    val.x = oPtr[0] * invR0;
+    val.y = oPtr[32] * invR0;
+    output[(outputOffset + i*BLK_N)/2] = val;
+    val.x = oPtr[64] * invR1;
+    val.y = oPtr[96] * invR1;
+    output[(outputOffset + i*BLK_N + BLK_M/2*embeddingDim)/2] = val;
+  }
+  if(threadIdx.x == 0){
+    timer[3 * blockIdx.x] = begin;
+    timer[3 * blockIdx.x + 1] = globalTimer64();
+    timer[3 * blockIdx.x + 2] = (clocktype)(getSMId());
+  }
+}
+
 // Permuted columns of V
 __global__ void f3sKernel1tb1rwScheduledPermutedV(
     const int *__restrict__ rowWindowOffset,
@@ -1282,6 +1693,202 @@ __global__ void f3sKernel1tb1rwScheduledPermutedV(
     val.z = oPtr[96] * invR1;
     val.w = oPtr[224] * invR1;
     output_float4[(outputOffset + i*BLK_M + BLK_M/2*embeddingDim)/4] = val;
+  }
+}
+
+// doesn't permute columns of V
+__global__ void f3sKernel1tb1rwScheduledClocked(
+    const int *__restrict__ rowWindowOffset,
+    const int *__restrict__ sortedRowWindows,
+    const int *__restrict__ sparseAToXidx, 
+    const uint64_t *__restrict__ tcbBitMap,
+    int embeddingDim,
+    int nRw,
+    ulonglong2 *__restrict__ Q, 
+    ulonglong2 *__restrict__ K, 
+    half *__restrict__ V,
+    float2 *output,
+    float2 *sddmmResult,
+    clocktype* timer) {
+  clocktype begin = globalTimer64();
+  Scheduler scheduler;
+  volatile int laneId = threadIdx.x;
+  int warpId = threadIdx.y;
+  // contains a RW of Q
+  extern __shared__ __align__(16) uint64_t dynShm1tb1rw[];
+  __shared__ float maxOld[BLK_M];
+  // r_b in Alg 1
+  __shared__ float sumOld[BLK_M];
+  __shared__ float mTilde[BLK_M];
+
+  scheduler.next_iter(sortedRowWindows, nRw);
+  int niter = ((rowWindowOffset[scheduler.targetRw+1] - rowWindowOffset[scheduler.targetRw])*2
+                + blockDim.y - 1)/blockDim.y;
+  {
+    //initialize everything to 0
+    int oOffset = (embeddingDim+blockDim.y*BLK_N)*BLK_M/4 + 2*blockDim.y*BLK_M/2;
+    for(int i = tid; i < oOffset + embeddingDim*BLK_M/2; i += blockDim.x*blockDim.y){
+      dynShm1tb1rw[i] = 0;
+    }
+    for(int i = tid; i < BLK_M; i += blockDim.x*blockDim.y){
+      maxOld[i] = 0.0f;
+      sumOld[i] = 0.0f;
+      mTilde[i] = 0.0f;
+    }
+  }
+  //BLK_M/2 because each thread loads 2 128b elements
+  for(int i = tid; i < (BLK_M/2)*embeddingDim/8; i += blockDim.x*blockDim.y){
+    loadQHbm2Shm128b(dynShm1tb1rw, Q+scheduler.targetRw*BLK_M*embeddingDim/8, embeddingDim, i);
+  }
+  __syncthreads();
+  for(int iter = 0; iter < niter; iter++){
+    int iterTcbStart = rowWindowOffset[scheduler.targetRw] + iter*blockDim.y/2;
+    // number of 16x16 blocks in S/E being computed in this iteration.
+    int nBlock = min(blockDim.y/2, rowWindowOffset[scheduler.targetRw+1]-iterTcbStart);
+    float S_frag[4] = {0.0f};
+    int warpTcbId = warpId/2 + iterTcbStart;
+    if(warpId < nBlock*2){
+      {//sddmm
+        int kOffset = sparseAToXidx[warpTcbId*BLK_M + (warpId%2)*BLK_N + laneId/4] 
+                      * embeddingDim/8 + laneId % 4;
+        for(int i = 0; i < embeddingDim/BLK_K; i+=2) {
+          //load K with permuted columns
+          ulonglong2 val = K[kOffset + i*BLK_K/8];
+          uint64_t Q_frag[2];
+          loadQFragShm(Q_frag, dynShm1tb1rw, i, laneId);
+          HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
+                    static_cast<uint32_t>(Q_frag[0] & 0xFFFFFFFFull), 
+                    static_cast<uint32_t>(Q_frag[1] & 0xFFFFFFFFull), 
+                    static_cast<uint32_t>(Q_frag[0] >> 32), 
+                    static_cast<uint32_t>(Q_frag[1] >> 32), 
+                    static_cast<uint32_t>(val.x & 0xFFFFFFFFull), 
+                    static_cast<uint32_t>(val.x >> 32), 
+                    S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
+          loadQFragShm(Q_frag, dynShm1tb1rw, i+1, laneId);
+          HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
+                    static_cast<uint32_t>(Q_frag[0] & 0xFFFFFFFFull), 
+                    static_cast<uint32_t>(Q_frag[1] & 0xFFFFFFFFull), 
+                    static_cast<uint32_t>(Q_frag[0] >> 32), 
+                    static_cast<uint32_t>(Q_frag[1] >> 32), 
+                    static_cast<uint32_t>(val.y & 0xFFFFFFFFull), 
+                    static_cast<uint32_t>(val.y >> 32), 
+                    S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
+        }
+        int bitIdx = 63 - laneId*2;
+        for(int i = 0; i < 4; i++){
+          uint64_t bitMask = 1ULL << (bitIdx - i%2);
+          S_frag[i] = (tcbBitMap[warpTcbId*4+(warpId%2)*2+i/2] & bitMask) == 0 ? 0.0f : S_frag[i];
+        }
+      }
+      {//online softmax
+        float* maxPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2 + laneId/4 + blockDim.y*BLK_M;
+        //save max of each row within the warp to shared memory for cross-warp communication
+        for(int i=0; i<2; i++){
+          float localMax = fmaxf(S_frag[i*2], S_frag[i*2+1]);
+          reduceMax(localMax, laneId);
+          if(laneId % 4 == 0){
+            maxPtr[warpId*BLK_M + i*BLK_M/2] = localMax;
+          }
+        }
+      }
+    }
+    __syncthreads();
+    if(warpId < nBlock*2){
+      float* sumPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2;
+      for(int i=0; i<2; i++){
+        int offset = i*BLK_M/2 + laneId/4;
+        float* maxPtr = sumPtr + blockDim.y*BLK_M + offset;
+        float newGlobalMax = maxOld[offset];
+        //we have blockDim.y columns reserved for local sum of each warp
+        //but only nBlock*2 are used
+        for(int j=0; j<nBlock*2; j++){
+          newGlobalMax = fmaxf(maxPtr[j*BLK_M], newGlobalMax);
+        }
+        if(warpId == 0 && laneId % 4 == 0){
+          mTilde[offset] = __expf(maxOld[offset] - newGlobalMax);
+          maxOld[offset] = newGlobalMax;
+        }
+        //compute E, ignore 0s
+        S_frag[i*2] = S_frag[i*2]==0.0f ? 0.0f : __expf(S_frag[i*2] - newGlobalMax);
+        S_frag[i*2+1] = S_frag[i*2+1]==0.0f ? 0.0f : __expf(S_frag[i*2+1] - newGlobalMax);
+        //compute row sum and save to shared memory
+        float localSum = S_frag[i*2] + S_frag[i*2+1];
+        reduceSum(localSum);
+        if(laneId % 4 == 0){
+          sumPtr[warpId*BLK_M + offset] = localSum;
+        }
+      }
+      int eOffset = (embeddingDim + warpId*BLK_N)*BLK_M/2+laneId;
+      storeEFragShm(S_frag, reinterpret_cast<uint32_t*>(dynShm1tb1rw)+eOffset);
+    }
+    __syncthreads();
+    //Could try moving this block to the end of the loop
+    //Without warpId == 0, the compiler gets confused and the long scoreboard stall will increase significantly.
+    if(warpId == 0 && tid < BLK_M){
+      float* sumPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2 + laneId;
+      //update r_b
+      float rowSum = 0.0f;
+      //we have blockDim.y columns reserved for local sum of each warp
+      //but only nBlock*2 are used
+      for(int j=0; j<nBlock*2; j++){
+        rowSum += sumPtr[j*BLK_M];
+      }
+      sumOld[laneId] = fmaf(mTilde[laneId], sumOld[laneId], rowSum);
+    }
+    __syncthreads();
+    {//SpMM
+      int oOffset_base = (embeddingDim+blockDim.y*BLK_N)*BLK_M/2 + 2*blockDim.y*BLK_M + laneId;
+      uint16_t* V_uint16 = reinterpret_cast<uint16_t*>(V);
+      for(int i=warpId; i<embeddingDim/BLK_N; i+=blockDim.y){
+        int vRowOffset = i*BLK_N + laneId/4;
+        float O_frag[4];
+        loadOFragShm(O_frag, reinterpret_cast<float*>(dynShm1tb1rw)+oOffset_base + i*BLK_M*BLK_N, mTilde+laneId/4);
+        for(int j=0; j<nBlock; j++){
+          uint32_t E_frag[4];
+          uint32_t B_frag[2];
+          //load V
+          int sparseAToXidxOffset = (iterTcbStart+j)*BLK_M + (laneId%4)*2;
+          for(int k = 0; k < 2; k++){
+            sparseAToXidxOffset += k*BLK_N;
+            int offset = sparseAToXidx[sparseAToXidxOffset]*embeddingDim+ vRowOffset;
+            int offset2 = sparseAToXidx[sparseAToXidxOffset+1]*embeddingDim+ vRowOffset;
+            B_frag[k] = ((uint32_t)V_uint16[offset2] << 16) | V_uint16[offset];
+          }
+          //load E
+          int eOffset = (embeddingDim+j*BLK_M)*BLK_M/2 + laneId;
+          loadEFragShm(E_frag, reinterpret_cast<uint32_t*>(dynShm1tb1rw)+eOffset);
+          HMMA16816(O_frag[0], O_frag[1], O_frag[2], O_frag[3], 
+                    E_frag[0], E_frag[1], E_frag[2], E_frag[3], 
+                    B_frag[0], B_frag[1], 
+                    O_frag[0], O_frag[1], O_frag[2], O_frag[3]);
+        }
+        storeOFragShm(O_frag, reinterpret_cast<float*>(dynShm1tb1rw)+oOffset_base + i*BLK_M*BLK_N);
+      }
+    }
+  }
+  __syncthreads();
+  float invR0 = sumOld[laneId/4] == 0.0f ? 0.0f : __frcp_rn(sumOld[laneId/4]);
+  float invR1 = sumOld[BLK_M/2 + laneId/4] == 0.0f ? 0.0f : __frcp_rn(sumOld[BLK_M/2 + laneId/4]);
+  //points to (laneId)th element of O
+  int oOffset = (embeddingDim+blockDim.y*BLK_N)*BLK_M/2 + 2*blockDim.y*BLK_M + laneId;
+  //offset in terms of number of elements,
+  //have to be divided by 2 to get the index of the float2
+  int outputOffset = (scheduler.targetRw*BLK_M + laneId/4)*embeddingDim + (laneId%4)*2;
+  for(int i = warpId; i < embeddingDim/BLK_N; i += blockDim.y){
+    int offset = oOffset + i*BLK_M*BLK_N;
+    float* oPtr = reinterpret_cast<float*>(dynShm1tb1rw) + offset;
+    float2 val;
+    val.x = oPtr[0] * invR0;
+    val.y = oPtr[32] * invR0;
+    output[(outputOffset + i*BLK_N)/2] = val;
+    val.x = oPtr[64] * invR1;
+    val.y = oPtr[96] * invR1;
+    output[(outputOffset + i*BLK_N + BLK_M/2*embeddingDim)/2] = val;
+  }
+  if(tid == 0){
+    timer[3 * blockIdx.x] = begin;
+    timer[3 * blockIdx.x + 1] = globalTimer64();
+    timer[3 * blockIdx.x + 2] = (clocktype)(getSMId());
   }
 }
 

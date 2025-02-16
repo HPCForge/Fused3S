@@ -106,6 +106,16 @@ f3sCuda1tb1tcb(
     bool saveSddmmResult);
 
 std::vector<torch::Tensor> 
+f3sCuda1tb1rwClocked(
+    torch::Tensor rowWindowOffset,
+    torch::Tensor sparseAToXidx,
+    torch::Tensor tcbBitMap,
+    int nNodes,
+    int embeddingDim,
+    torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+    int nWarpPerBlock);
+
+std::vector<torch::Tensor> 
 f3sCuda1tb1rw(
     torch::Tensor rowWindowOffset,
     torch::Tensor sparseAToXidx,
@@ -115,6 +125,17 @@ f3sCuda1tb1rw(
     torch::Tensor Q, torch::Tensor K, torch::Tensor V,
     int nWarpPerBlock,
     bool applySoftmax);
+
+std::vector<torch::Tensor> 
+f3sCuda1tb1rwScheduledClocked(
+    torch::Tensor rowWindowOffset,
+    torch::Tensor sortedRowWindows,
+    torch::Tensor sparseAToXidx,
+    torch::Tensor tcbBitMap,
+    int nNodes,
+    int embeddingDim,
+    torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+    int nWarpPerBlock);
 
 std::vector<torch::Tensor> 
 f3sCuda1tb1rwScheduled(
@@ -148,7 +169,8 @@ f3s1tb1rw(
   int nNodes, 
   torch::Tensor Q, torch::Tensor K, torch::Tensor V,
   int nWarpPerBlock,
-  bool applySoftmax
+  bool applySoftmax,
+  bool checkSMActiveTime
 ){
   CHECK_INPUT(rowWindowOffset);
   CHECK_INPUT(sparseAToXidx);
@@ -158,7 +180,16 @@ f3s1tb1rw(
   CHECK_INPUT(V);
   int embeddingDim = Q.size(1);
   std::vector<torch::Tensor> result;
-  result = f3sCuda1tb1rw(rowWindowOffset, 
+  if(checkSMActiveTime){
+    result = f3sCuda1tb1rwClocked(rowWindowOffset, 
+                                  sparseAToXidx, 
+                                  tcbBitMap, 
+                                  nNodes, 
+                                  embeddingDim,
+                                  Q, K, V,
+                                  nWarpPerBlock);
+  }else{
+    result = f3sCuda1tb1rw(rowWindowOffset, 
                           sparseAToXidx, 
                           tcbBitMap, 
                           nNodes, 
@@ -166,6 +197,7 @@ f3s1tb1rw(
                           Q, K, V,
                           nWarpPerBlock,
                           applySoftmax);
+  }
   return result;
 }
 
@@ -177,10 +209,21 @@ f3s1tb1rwScheduled(
     torch::Tensor tcbBitMap,
     int nNodes,
     torch::Tensor Q, torch::Tensor K, torch::Tensor V,
-    int nWarpPerBlock){
+    int nWarpPerBlock,
+    bool checkSMActiveTime){
   int embeddingDim = Q.size(1);
   std::vector<torch::Tensor> result;
-  result = f3sCuda1tb1rwScheduled(rowWindowOffset, 
+  if(checkSMActiveTime){
+    result = f3sCuda1tb1rwScheduledClocked(rowWindowOffset, 
+                                  sortedRowWindows, 
+                                  sparseAToXidx, 
+                                  tcbBitMap, 
+                                  nNodes, 
+                                  embeddingDim, 
+                                  Q, K, V, 
+                                  nWarpPerBlock);
+  }else{
+    result = f3sCuda1tb1rwScheduled(rowWindowOffset, 
                                   sortedRowWindows, 
                                   sparseAToXidx, 
                                   tcbBitMap, 
@@ -189,6 +232,7 @@ f3s1tb1rwScheduled(
                                   Q, K, V, 
                                   nWarpPerBlock,
                                   false);
+  }
   return result;
 }
 // same as f3s1tb1rwScheduled except permute V = true
