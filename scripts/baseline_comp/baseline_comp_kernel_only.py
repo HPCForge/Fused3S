@@ -7,6 +7,7 @@ from torch_geometric.utils import softmax
 import FS_Block
 import FS_SDDMM
 import FS_SpMM
+import ogb
 
 def check_gpu_memory():
   if torch.cuda.is_available():
@@ -81,13 +82,13 @@ class InputInfo:
 
 def event_timing_decorator(kernel, graphInfo, perf):
   def wrapper(*args, **kwargs):
-    niter = 5
+    times = []
+    niter = 10
     # warmup
-    for i in range(10):
+    for i in range(3):
       out = kernel(*args, **kwargs)
     torch.cuda.synchronize()
     print(f"{kernel.__name__} warmup done")
-    execution_time = 0
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     for i in range(niter):
@@ -95,25 +96,25 @@ def event_timing_decorator(kernel, graphInfo, perf):
       out = kernel(*args, **kwargs)
       end_event.record()
       end_event.synchronize()
-      execution_time += start_event.elapsed_time(end_event)
-    execution_time /= niter
-    print(f"{kernel.__name__} average execution time: {execution_time} ms")
+      times.append(start_event.elapsed_time(end_event))
+    execution_time = np.median(times)
+    print(f"{kernel.__name__} median execution time: {execution_time} ms")
     perf.pd.loc[graphInfo.name, kernel.__name__] = execution_time
     return out
   return wrapper
 
 def timing_decorator(kernel, graphInfo, perf):
   def wrapper(*args, **kwargs):
-    niter = 3
+    times = []
+    niter = 10
     # warmup
     for i in range(3):
       kernel(*args, **kwargs)
-    total_time = 0
     for i in range(niter):
       output = kernel(*args, **kwargs)
-      total_time += output[0].item()
-    avg_time = total_time / niter
-    print(f"{kernel.__name__} average execution time: {avg_time} ms")
+      times.append(output[0].item())
+    avg_time = np.median(times)
+    print(f"{kernel.__name__} median execution time: {avg_time} ms")
     perf.pd.loc[graphInfo.name, kernel.__name__] = avg_time
     return output
   return wrapper
@@ -153,7 +154,7 @@ def flashSparse_naive_softmax(Q, K, V, inputInfo):
   att = torch.exp(att) # softmax
   end_event.record()
   end_event.synchronize()
-  softmax_time = start_event.elapsed_time(end_event)
+  exp_time = start_event.elapsed_time(end_event)
   spmm_ones_time, rows_sum = FS_SpMM.forward_fp16_gnn_ones(   
                               inputInfo.row_pointers, 
                               inputInfo.column_index, 
@@ -180,8 +181,9 @@ def flashSparse_naive_softmax(Q, K, V, inputInfo):
   h_prime = h_prime.div(rows_sum) # softmax
   end_event.record()
   end_event.synchronize()
-  softmax_time += start_event.elapsed_time(end_event)
-  total_time = sddmm_time + spmm_ones_time + spmm_time + softmax_time
+  div_time = start_event.elapsed_time(end_event)
+  total_time = sddmm_time + spmm_ones_time + spmm_time + exp_time + div_time
+  print(f"naive_softmax: sddmm: {sddmm_time} ms, spmm_ones: {spmm_ones_time} ms, spmm: {spmm_time} ms, exp: {exp_time} ms, div: {div_time} ms, total: {total_time} ms")
   return total_time, h_prime
 
 def flashSparse_stable_softmax(Q, K, V, inputInfo):
@@ -210,6 +212,7 @@ def flashSparse_stable_softmax(Q, K, V, inputInfo):
               V.size(1), 
               inputInfo.num_nodes_ori)
   total_time = sddmm_time + softmax_time + spmm_time
+  print(f"stable_softmax: sddmm: {sddmm_time} ms, softmax: {softmax_time} ms, spmm: {spmm_time} ms, total: {total_time} ms")
   return total_time, h_prime
   
 def route_flashSparse(args, inputInfo, perf):
@@ -395,7 +398,6 @@ def pyg_gtconv(args, graphInfo, perf):
   conv = TransformerConv(args.embedding_dim, args.embedding_dim, heads=1, bias=False, root_weight=False)
   propagate = event_timing_decorator(conv.propagate, graphInfo, perf)
   num_nodes = graphInfo.num_nodes
-  print(f"num_nodes: {num_nodes}")
   Q = torch.rand(num_nodes, 1, args.embedding_dim, dtype=torch.float32, device=args.dev)
   K = torch.rand(num_nodes, 1, args.embedding_dim, dtype=torch.float32, device=args.dev)
   V = torch.rand(num_nodes, 1, args.embedding_dim, dtype=torch.float32, device=args.dev)
