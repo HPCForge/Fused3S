@@ -187,7 +187,7 @@ __device__ void addPartialSums(float* sum, int tcbId, int tid, int n_warps, cons
   }
 }
 
-__device__ void setQFrag(volatile uint32_t* Q_frag, uint64_t* Q, int bid, int warpId, int laneId, int numNodes, int embeddingDim){
+__device__ void setQFragPermute(volatile uint32_t* Q_frag, uint64_t* Q, int bid, int warpId, int laneId, int numNodes, int embeddingDim){
    // Threads of a warp for fetching a 16X16 block of Q.
   // DOC: https://docs.nvidia.com/cuda/parallel-thread-execution/index.html?highlight=wmma#matrix-fragments-for-mma-m16n8k16-with-floating-point-type
   // Here I'm swapping columns of Q to make the memory access more coalesced. 
@@ -204,6 +204,24 @@ __device__ void setQFrag(volatile uint32_t* Q_frag, uint64_t* Q, int bid, int wa
     uint64_t val = Q[(rowIdx+8) * embeddingDim/4 + colIdx];
     Q_frag[1] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
     Q_frag[3] = static_cast<uint32_t>(val >> 32);
+  }
+}
+
+__device__ void setQFrag(volatile uint32_t* Q_frag, uint32_t* Q, int bid, int warpId, int laneId, int numNodes, int embeddingDim){
+   // Threads of a warp for fetching a 16X16 block of Q.
+  // DOC: https://docs.nvidia.com/cuda/parallel-thread-execution/index.html?highlight=wmma#matrix-fragments-for-mma-m16n8k16-with-floating-point-type
+  // Here I'm swapping columns of Q to make the memory access more coalesced. 
+  // So when loading K, we have to swap the rows accordingly in order to get the same result.
+  int rowIdx = bid * BLK_M + laneId/4;
+  // /4 because half4.
+  int colIdx = warpId * BLK_K/2 + (laneId%4);
+  if(rowIdx < numNodes){
+    Q_frag[0] = Q[rowIdx * embeddingDim/2 + colIdx];
+    Q_frag[2] = Q[rowIdx * embeddingDim/2 + colIdx + BLK_K/4];
+  }
+  if(rowIdx + 8 < numNodes){
+    Q_frag[1] = Q[(rowIdx+8) * embeddingDim/2 + colIdx];
+    Q_frag[3] = Q[(rowIdx+8) * embeddingDim/2 + colIdx + BLK_K/4];
   }
 }
 
@@ -281,8 +299,8 @@ __global__ void f3sKernel1tb1rw(
     const int *__restrict__ sparseAToXidx, 
     const uint64_t *__restrict__ tcbBitMap,
     int embeddingDim,
-    ulonglong2 *__restrict__ Q, 
-    ulonglong2 *__restrict__ K,
+    uint32_t *__restrict__ Q, 
+    uint32_t *__restrict__ K,
     half *__restrict__ V,
     float2 *output,
     float2 *sddmmResult);
@@ -306,8 +324,8 @@ __global__ void f3sKernel1tb1rwScheduled(
     const uint64_t *__restrict__ tcbBitMap,
     int embeddingDim,
     int nRw,
-    ulonglong2 *__restrict__ Q, 
-    ulonglong2 *__restrict__ K, 
+    uint32_t *__restrict__ Q, 
+    uint32_t *__restrict__ K, 
     half *__restrict__ V,
     float2 *output,
     float2 *sddmmResult);
@@ -326,7 +344,7 @@ __global__ void f3sKernel1tb1rwScheduledClocked(
   float2 *sddmmResult,
   clocktype* timer);
 
-__global__ void f3sKernel1tb1rwScheduledPermutedV(
+__global__ void f3sKernel1tb1rwScheduledPermutedQKV(
     const int *__restrict__ rowWindowOffset,
     const int *__restrict__ sortedRowWindows,
     const int *__restrict__ sparseAToXidx, 
@@ -464,8 +482,8 @@ f3sCuda1tb1rw(
       sparseAToXidx.data_ptr<int>(),
       tcbBitMap.data_ptr<uint64_t>(),
       embeddingDim,
-      reinterpret_cast<ulonglong2*>(Q.data_ptr<torch::Half>()), 
-      reinterpret_cast<ulonglong2*>(K.data_ptr<torch::Half>()), 
+      reinterpret_cast<uint32_t*>(Q.data_ptr<torch::Half>()), 
+      reinterpret_cast<uint32_t*>(K.data_ptr<torch::Half>()), 
       reinterpret_cast<half*>(V.data_ptr<torch::Half>()),
       reinterpret_cast<float2*>(output.data_ptr<float>()),
       reinterpret_cast<float2*>(sddmmResult.data_ptr<float>()));
@@ -642,8 +660,6 @@ f3sCuda1tb1rwScheduled(
   sharedSize += nWarpPerBlock * BLK_M * BLK_N * sizeof(half); // E
   sharedSize += nWarpPerBlock * 2 * BLK_M * sizeof(float); // row_max, row_sum, old_max, old_sum
   sharedSize += BLK_M * embeddingDim * sizeof(float); // O_frag
-  // sharedSize += nWarpPerBlock * 2 * BLK_K * BLK_N * sizeof(half); // V double buffer
-  // printf("sharedSize: %d\n", sharedSize);
   dim3 grid(nRowWindow, 1, 1);
   dim3 block(WARP_SIZE, nWarpPerBlock, 1);
   // create cuda event
@@ -652,7 +668,7 @@ f3sCuda1tb1rwScheduled(
   cudaEventCreate(&stop);
   cudaEventRecord(start, 0);
   if(permuteV){
-    f3sKernel1tb1rwScheduledPermutedV<<<grid, block, sharedSize>>>(
+    f3sKernel1tb1rwScheduledPermutedQKV<<<grid, block, sharedSize>>>(
       rowWindowOffset.data_ptr<int>(), 
       sortedRowWindows.data_ptr<int>(), 
       sparseAToXidx.data_ptr<int>(),
@@ -673,8 +689,8 @@ f3sCuda1tb1rwScheduled(
       tcbBitMap.data_ptr<uint64_t>(),
       embeddingDim,
       nRowWindow,
-      reinterpret_cast<ulonglong2*>(Q.data_ptr<torch::Half>()), 
-      reinterpret_cast<ulonglong2*>(K.data_ptr<torch::Half>()), 
+      reinterpret_cast<uint32_t*>(Q.data_ptr<torch::Half>()), 
+      reinterpret_cast<uint32_t*>(K.data_ptr<torch::Half>()), 
       reinterpret_cast<half*>(V.data_ptr<torch::Half>()),
       reinterpret_cast<float2*>(output.data_ptr<float>()),
       sddmmResultPtr);
@@ -684,7 +700,6 @@ f3sCuda1tb1rwScheduled(
   float milliseconds = 0;
   cudaEventElapsedTime(&milliseconds, start, stop);
   torch::Tensor time = torch::tensor(milliseconds, torch::TensorOptions().dtype(torch::kFloat32));
-  // cudaDeviceSynchronize();
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
     printf("CUDA error: %s\n", cudaGetErrorString(error));
@@ -754,21 +769,19 @@ __global__ void f3sKernel1tb1tcb(
   volatile int warpId = threadIdx.y;    // warp_index handling multi-dimension > 16.
   volatile int laneId = threadIdx.x; // lanid of each warp.
 
-  uint64_t* K_uint64 = reinterpret_cast<uint64_t*>(K);
+  uint32_t* K_uint32 = reinterpret_cast<uint32_t*>(K);
 
   // row_max, row_sum (size BLK_M each) for online-softmax,
   // then Q_frag, then O_frag
   extern __shared__ float dynShm[]; 
   for(int i = tid; i < BLK_M*2+blockDim.y*BLK_M*BLK_M; i += blockDim.x*blockDim.y){
-  // for(int i = tid; i < BLK_M*2; i += blockDim.x*blockDim.y){
     dynShm[i] = 0.0f;
   }
  
   float* sum = dynShm + BLK_M*2;
   float O_frag[8] = {0};// spmm result
   uint32_t Q_frag[4] = {0};
-  setQFrag(Q_frag, reinterpret_cast<uint64_t*>(Q), bid, warpId, laneId, numNodes, embeddingDim);
-  // setQFragShm(dynShm, reinterpret_cast<uint64_t*>(Q), bid, warpId, laneId, numNodes, embeddingDim);
+  setQFrag(Q_frag, reinterpret_cast<uint32_t*>(Q), bid, warpId, laneId, numNodes, embeddingDim);
 
   /////////////////////////////////
   // main loop
@@ -781,19 +794,15 @@ __global__ void f3sKernel1tb1tcb(
     {// sddmm
       uint32_t B_frag[2];
       float D_frag[4];
-      // uint32_t* Q_frag = reinterpret_cast<uint32_t*>(dynShm + BLK_M*2 + warpId*blockDim.x*4);
-      int colIdx = (warpId * BLK_M)/4 + (laneId % 4); 
+      // int colIdx = (warpId * BLK_M)/4 + (laneId % 4); 
+      int colIdx = (warpId * BLK_M)/2 + (laneId % 4); 
       for(int i = 0; i < 2; i++){
         if(!lastBlock || i == 0){
           // Initialize B_frag from K
-          // Note I'm swapping rows of B_frag because we swapped the columns of A_frag(Q)
-          // index in terms of half2, only affect rowIdx
           int rowIdx = sparseAToXidx[(tcbId+i) * BLK_N + laneId / 4]; 
-          uint64_t val = K_uint64[rowIdx * embeddingDim/4 + colIdx];
-          B_frag[0] = static_cast<uint32_t>(val & 0xFFFFFFFFull);
-          B_frag[1] = static_cast<uint32_t>(val >> 32);
+          B_frag[0] = K_uint32[rowIdx * embeddingDim/2 + colIdx];
+          B_frag[1] = K_uint32[rowIdx * embeddingDim/2 + colIdx + BLK_M/4];
           HMMA16816(D_frag[0], D_frag[1], D_frag[2], D_frag[3], 
-                    // Q_frag[laneId], Q_frag[blockDim.x + laneId], Q_frag[blockDim.x*2 + laneId], Q_frag[blockDim.x*3 + laneId], 
                     Q_frag[0], Q_frag[1], Q_frag[2], Q_frag[3], 
                     B_frag[0], B_frag[1], 
                     0.0f, 0.0f, 0.0f, 0.0f);
@@ -855,11 +864,6 @@ __global__ void f3sKernel1tb1tcb(
           O_frag[j*2+1] = O_frag[j*2+1] * expMaxDiff;
           O_frag[j*2+4] = O_frag[j*2+4] * expMaxDiff;
           O_frag[j*2+5] = O_frag[j*2+5] * expMaxDiff;
-          // float* O_frag = dynShm + BLK_M*2 + blockDim.x*blockDim.y*4 + warpId*blockDim.x*8;
-          // O_frag[blockDim.x*j*2 + laneId]     = O_frag[blockDim.x*j*2 + laneId]   * (expMaxDiff);
-          // O_frag[blockDim.x*(j*2+1) + laneId] = O_frag[blockDim.x*(j*2+1) + laneId] * (expMaxDiff);
-          // O_frag[blockDim.x*(j*2+4) + laneId] = O_frag[blockDim.x*(j*2+4) + laneId] * (expMaxDiff);
-          // O_frag[blockDim.x*(j*2+5) + laneId] = O_frag[blockDim.x*(j*2+5) + laneId] * (expMaxDiff);
 
           if(warpId == 0 && laneId % 4 == 0){
             dynShm[j*BLK_N + laneId/4] = max;
@@ -893,10 +897,6 @@ __global__ void f3sKernel1tb1tcb(
         }
       }
       __syncthreads();
-      //reset sum to 0
-      // for(int i = tid; i < BLK_M * BLK_N * 2; i += blockDim.x * blockDim.y){
-      //   sum[i] = 0.0f;
-      // }
       for(int i = laneId; i < BLK_M*BLK_M; i += blockDim.x){
         sum[warpId*BLK_M*BLK_M + i] = 0.0f;
       }
@@ -923,25 +923,18 @@ __global__ void f3sKernel1tb1tcb(
               B_frag[i] = 0;
             }
           }
-          // HMMA16816(O_frag[blockDim.x*j*4 + laneId], O_frag[blockDim.x*(j*4+1) + laneId], O_frag[blockDim.x*(j*4+2) + laneId], O_frag[blockDim.x*(j*4+3) + laneId], 
           HMMA16816(O_frag[4*j], O_frag[4*j+1], O_frag[4*j+2], O_frag[4*j+3],
                     S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
                     B_frag[0], B_frag[1], 
-                 // O_frag[blockDim.x*4*j + laneId], O_frag[blockDim.x*(4*j+1) + laneId], O_frag[blockDim.x*(4*j+2) + laneId], O_frag[blockDim.x*(4*j+3) + laneId]);
                     O_frag[4*j], O_frag[4*j+1], O_frag[4*j+2], O_frag[4*j+3]);
         }
       }
     }
   }
-  // float* O_frag = dynShm + BLK_M*2 + blockDim.x*blockDim.y*4 + warpId*blockDim.x*8;
   if(applySoftmax){
     for(int i = 0; i < 2; i++){
       float rowSum = dynShm[BLK_M + laneId/4 + i*BLK_N ];
       if(rowSum != 0.0f){
-        // O_frag[blockDim.x*i*2 + laneId] = O_frag[blockDim.x*i*2 + laneId] * (1.0f/rowSum);
-        // O_frag[blockDim.x*(i*2+1) + laneId] = O_frag[blockDim.x*(i*2+1) + laneId] * (1.0f/rowSum);
-        // O_frag[blockDim.x*(i*2+4) + laneId] = O_frag[blockDim.x*(i*2+4) + laneId] * (1.0f/rowSum);
-        // O_frag[blockDim.x*(i*2+5) + laneId] = O_frag[blockDim.x*(i*2+5) + laneId] * (1.0f/rowSum);
         O_frag[i*2] = O_frag[i*2] * (1.0f/rowSum);
         O_frag[i*2+1] = O_frag[i*2+1] * (1.0f/rowSum);
         O_frag[i*2+4] = O_frag[i*2+4] * (1.0f/rowSum);
@@ -954,8 +947,6 @@ __global__ void f3sKernel1tb1tcb(
     int rowIdx = bid * BLK_M + (laneId / 4) + j * BLK_M/2;
     for(int i =0; i < 2; i++){// 2 16x8 blocks
       int colIdx = (warpId * 2 + i) * BLK_N + (laneId % 4) * 2;
-      // output[rowIdx * embeddingDim + colIdx] = O_frag[blockDim.x*(i*4 + j*2) + laneId];
-      // output[rowIdx * embeddingDim + colIdx + 1] = O_frag[blockDim.x*(i*4 + j*2 + 1) + laneId]; 
       output[rowIdx * embeddingDim + colIdx] = O_frag[i*4 + j*2];
       output[rowIdx * embeddingDim + colIdx + 1] = O_frag[i*4 + j*2 + 1]; 
     }
@@ -993,13 +984,32 @@ __device__ void loadQHbm2Shm128b(uint64_t* qShm, ulonglong2* Q, int embeddingDim
 }
 
 // Pair with loadQHbm2Shm128b. 
-// This function has each warp read 1 16x16 block. 
+// This function has each warp read a 16x4 block of uint64_t 
 //Not following the register layout in ptx doc but reordering it to match how K is loaded.
 __device__ void loadQFragShm(uint64_t* Q_frag, uint64_t* dynShm, int ind, int laneId) {
   // 4 because BLK_M*sizeof(half)/sizeof(uint64_t) = 4
   int offset = ind*BLK_M*4 + laneId*2;
   Q_frag[0] = dynShm[offset];
   Q_frag[1] = dynShm[offset + 1];
+}
+
+// Q should already have the TB offset
+// Q is in row major
+// qShm is in block column major, inside block it's row major. Block size is 8x4.
+__device__ void loadQHbm2Shm32b(uint32_t* qShm, uint32_t* Q, int embeddingDim, int ind){
+  // int blockWidth = BLK_M/4;
+  // int blockHeight = BLK_M/2;
+  int qWidth = embeddingDim/2;
+  uint32_t val = Q[ind];
+  int rowInd = ind/qWidth;
+  int colInd = ind%qWidth;
+  int blockRowInd = rowInd/(BLK_M/2);
+  int blockColInd = colInd/(BLK_M/4);
+  int blockInd = blockColInd * 2 + blockRowInd; 
+  int rowIndInBlock = rowInd%(BLK_M/2);
+  int colIndInBlock = colInd%(BLK_M/4);
+  int indInBlock = rowIndInBlock*(BLK_M/4) + colIndInBlock;
+  qShm[blockInd*((BLK_M/4)*(BLK_M/2)) + indInBlock] = val;
 }
 
 __device__ void storeEFragShm(float* E_frag, uint32_t* dynShm) {
@@ -1084,21 +1094,18 @@ __device__ void printKFrag(ulonglong2 val, int laneId) {
   printf("warpId: %d, laneId: %d, K0: %f, K1: %f, K2: %f, K3: %f, K4: %f, K5: %f, K6: %f, K7: %f\n", threadIdx.y, laneId, __half2float(h2U32Converter0.h2.x), __half2float(h2U32Converter0.h2.y), __half2float(h2U32Converter1.h2.x), __half2float(h2U32Converter1.h2.y), __half2float(h2U32Converter2.h2.x), __half2float(h2U32Converter2.h2.y), __half2float(h2U32Converter3.h2.x), __half2float(h2U32Converter3.h2.y));
 }
 
-// Each warp computes 1 tcb of S.
-// TODO: right now we need at least 2 warps per block because we need 2 tcbs to go to the spmm stage.
 __global__ void f3sKernel1tb1rw(
     const int *__restrict__ rowWindowOffset,
     const int *__restrict__ sparseAToXidx, 
     const uint64_t *__restrict__ tcbBitMap,
     int embeddingDim,
-    ulonglong2 *__restrict__ Q, 
-    ulonglong2 *__restrict__ K, 
+    uint32_t *__restrict__ Q, 
+    uint32_t *__restrict__ K, 
     half *__restrict__ V,
     float2 *output,
     float2 *sddmmResult) {
   volatile int laneId = threadIdx.x;
   int warpId = threadIdx.y;
-  // contains a RW of Q
   extern __shared__ __align__(16) uint64_t dynShm1tb1rw[];
   __shared__ float maxOld[BLK_M];
   // r_b in Alg 1
@@ -1116,12 +1123,11 @@ __global__ void f3sKernel1tb1rw(
       mTilde[i] = 0.0f;
     }
   }
-  //BLK_M/2 because each thread loads 2 128b elements
-  for(int i = tid; i < (BLK_M/2)*embeddingDim/8; i += blockDim.x*blockDim.y){
-    loadQHbm2Shm128b(dynShm1tb1rw, Q+bid*BLK_M*embeddingDim/8, embeddingDim, i);
+  //each thread loads a 32bit elements
+  for(int i = tid; i < BLK_M*embeddingDim/2; i += blockDim.x*blockDim.y){
+    loadQHbm2Shm32b(reinterpret_cast<uint32_t*>(dynShm1tb1rw), Q+bid*BLK_M*embeddingDim/2, embeddingDim, i);
   }
   __syncthreads();
-
   int niter = ((rowWindowOffset[bid+1] - rowWindowOffset[bid])*2 + blockDim.y - 1)/blockDim.y;
   for(int iter = 0; iter < niter; iter++){
     int iterTcbStart = rowWindowOffset[bid] + iter*blockDim.y/2;
@@ -1131,28 +1137,16 @@ __global__ void f3sKernel1tb1rw(
     int warpTcbId = warpId/2 + iterTcbStart;
     if(warpId < nBlock*2){
       {//sddmm
-        int kOffset = sparseAToXidx[warpTcbId*BLK_M + (warpId%2)*BLK_N + laneId/4] * embeddingDim/8 + laneId % 4;
-        for(int i = 0; i < embeddingDim/BLK_K; i+=2) {
-          //load K with permuted columns
-          ulonglong2 val = K[kOffset + i*BLK_K/8];
-          uint64_t Q_frag[2];
-          loadQFragShm(Q_frag, dynShm1tb1rw, i, laneId);
+        int rowInd = sparseAToXidx[warpTcbId*BLK_M + (warpId%2)*BLK_N + laneId/4];
+        int kOffset = sparseAToXidx[warpTcbId*BLK_M + (warpId%2)*BLK_N + laneId/4] * embeddingDim/2 + laneId % 4;
+        for(int i = 0; i < embeddingDim/BLK_K; i++) {
+          uint32_t b_1 = K[kOffset + i*BLK_K/2];
+          uint32_t b_2 = K[kOffset + i*BLK_K/2 + BLK_K/4];
+          uint32_t Q_frag[4];
+          loadEFragShm(Q_frag, reinterpret_cast<uint32_t*>(dynShm1tb1rw)+i*BLK_M*BLK_M/2+laneId);
           HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
-                    static_cast<uint32_t>(Q_frag[0] & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(Q_frag[1] & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(Q_frag[0] >> 32), 
-                    static_cast<uint32_t>(Q_frag[1] >> 32), 
-                    static_cast<uint32_t>(val.x & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(val.x >> 32), 
-                    S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
-          loadQFragShm(Q_frag, dynShm1tb1rw, i+1, laneId);
-          HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
-                    static_cast<uint32_t>(Q_frag[0] & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(Q_frag[1] & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(Q_frag[0] >> 32), 
-                    static_cast<uint32_t>(Q_frag[1] >> 32), 
-                    static_cast<uint32_t>(val.y & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(val.y >> 32), 
+                    Q_frag[0], Q_frag[1], Q_frag[2], Q_frag[3], 
+                    b_1, b_2, 
                     S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
         }
         int bitIdx = 63 - laneId*2;
@@ -1280,8 +1274,7 @@ __global__ void f3sKernel1tb1rw(
   }
 }
 
-// Each warp computes 1 tcb of S.
-// TODO: right now we need at least 2 warps per block because we need 2 tcbs to go to the spmm stage.
+// this permutes QK and not V
 __global__ void f3sKernel1tb1rwClocked(
     const int *__restrict__ rowWindowOffset,
     const int *__restrict__ sparseAToXidx, 
@@ -1474,7 +1467,7 @@ __global__ void f3sKernel1tb1rwClocked(
 }
 
 // Permuted columns of V
-__global__ void f3sKernel1tb1rwScheduledPermutedV(
+__global__ void f3sKernel1tb1rwScheduledPermutedQKV(
     const int *__restrict__ rowWindowOffset,
     const int *__restrict__ sortedRowWindows,
     const int *__restrict__ sparseAToXidx, 
@@ -1892,7 +1885,6 @@ __global__ void f3sKernel1tb1rwScheduledClocked(
   }
 }
 
-// doesn't permute columns of V
 __global__ void f3sKernel1tb1rwScheduled(
     const int *__restrict__ rowWindowOffset,
     const int *__restrict__ sortedRowWindows,
@@ -1900,8 +1892,8 @@ __global__ void f3sKernel1tb1rwScheduled(
     const uint64_t *__restrict__ tcbBitMap,
     int embeddingDim,
     int nRw,
-    ulonglong2 *__restrict__ Q, 
-    ulonglong2 *__restrict__ K, 
+    uint32_t *__restrict__ Q, 
+    uint32_t *__restrict__ K, 
     half *__restrict__ V,
     float2 *output,
     float2 *sddmmResult) {
@@ -1930,9 +1922,9 @@ __global__ void f3sKernel1tb1rwScheduled(
       mTilde[i] = 0.0f;
     }
   }
-  //BLK_M/2 because each thread loads 2 128b elements
-  for(int i = tid; i < (BLK_M/2)*embeddingDim/8; i += blockDim.x*blockDim.y){
-    loadQHbm2Shm128b(dynShm1tb1rw, Q+scheduler.targetRw*BLK_M*embeddingDim/8, embeddingDim, i);
+  //each thread loads a 32bit elements
+  for(int i = tid; i < BLK_M*embeddingDim/2; i += blockDim.x*blockDim.y){
+    loadQHbm2Shm32b(reinterpret_cast<uint32_t*>(dynShm1tb1rw), Q+scheduler.targetRw*BLK_M*embeddingDim/2, embeddingDim, i);
   }
   __syncthreads();
   for(int iter = 0; iter < niter; iter++){
@@ -1943,29 +1935,16 @@ __global__ void f3sKernel1tb1rwScheduled(
     int warpTcbId = warpId/2 + iterTcbStart;
     if(warpId < nBlock*2){
       {//sddmm
-        int kOffset = sparseAToXidx[warpTcbId*BLK_M + (warpId%2)*BLK_N + laneId/4] 
-                      * embeddingDim/8 + laneId % 4;
-        for(int i = 0; i < embeddingDim/BLK_K; i+=2) {
-          //load K with permuted columns
-          ulonglong2 val = K[kOffset + i*BLK_K/8];
-          uint64_t Q_frag[2];
-          loadQFragShm(Q_frag, dynShm1tb1rw, i, laneId);
+        int rowInd = sparseAToXidx[warpTcbId*BLK_M + (warpId%2)*BLK_N + laneId/4];
+        int kOffset = sparseAToXidx[warpTcbId*BLK_M + (warpId%2)*BLK_N + laneId/4] * embeddingDim/2 + laneId % 4;
+        for(int i = 0; i < embeddingDim/BLK_K; i++) {
+          uint32_t b_1 = K[kOffset + i*BLK_K/2];
+          uint32_t b_2 = K[kOffset + i*BLK_K/2 + BLK_K/4];
+          uint32_t Q_frag[4];
+          loadEFragShm(Q_frag, reinterpret_cast<uint32_t*>(dynShm1tb1rw)+i*BLK_M*BLK_M/2+laneId);
           HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
-                    static_cast<uint32_t>(Q_frag[0] & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(Q_frag[1] & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(Q_frag[0] >> 32), 
-                    static_cast<uint32_t>(Q_frag[1] >> 32), 
-                    static_cast<uint32_t>(val.x & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(val.x >> 32), 
-                    S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
-          loadQFragShm(Q_frag, dynShm1tb1rw, i+1, laneId);
-          HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
-                    static_cast<uint32_t>(Q_frag[0] & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(Q_frag[1] & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(Q_frag[0] >> 32), 
-                    static_cast<uint32_t>(Q_frag[1] >> 32), 
-                    static_cast<uint32_t>(val.y & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(val.y >> 32), 
+                    Q_frag[0], Q_frag[1], Q_frag[2], Q_frag[3], 
+                    b_1, b_2, 
                     S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
         }
         int bitIdx = 63 - laneId*2;
@@ -2166,16 +2145,16 @@ __global__ void f2sKernel1tb1rw(
           S_frag[i] = (tcbBitMap[warpTcbId*4+(warpId%2)*2+i/2] & bitMask) == 0 ? 0.0f : S_frag[i];
         }
       }
-      {//save sddmm result
-        int offset = warpTcbId*BLK_M*BLK_M + (warpId%2)*BLK_M*BLK_N + laneId*2;
-        for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
-          int sumOffset = j*BLK_N*BLK_N;
-          float2 val;
-          val.x = S_frag[j*2];
-          val.y = S_frag[j*2+1];
-          sddmmResult[(offset + sumOffset)/2] = val;
-        }
-      }
+      // {//save sddmm result
+      //   int offset = warpTcbId*BLK_M*BLK_M + (warpId%2)*BLK_M*BLK_N + laneId*2;
+      //   for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
+      //     int sumOffset = j*BLK_N*BLK_N;
+      //     float2 val;
+      //     val.x = S_frag[j*2];
+      //     val.y = S_frag[j*2+1];
+      //     sddmmResult[(offset + sumOffset)/2] = val;
+      //   }
+      // }
     }
     __syncthreads();
     if(warpTcbId < rowWindowOffset[bid+1]){

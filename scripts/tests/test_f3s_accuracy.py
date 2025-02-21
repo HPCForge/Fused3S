@@ -199,12 +199,15 @@ def main(args):
                                                                     edgeToRow_cuda)
     for i in range(n_runs):
       if args.alg == '1tb1rw':
+        check_sm_active_time = False
+        print("using 1tb1rw")
         time, fusedR, sddmm_result = TCFMM.f3s_1tb1rw(RowWindowOffset, SparseAToXindex, TCblockBitMap, 
-                                                size, Q_half, K_half, V_half, nWarpPerBlock, apply_softmax)
+                                                size, Q_half, K_half, V_half, nWarpPerBlock, apply_softmax, check_sm_active_time)
       elif args.alg == '1tb1rw_scheduled':
         print("using 1tb1rw_scheduled")
+        check_sm_active_time = False
         time, fusedR, sddmm_result = TCFMM.f3s_1tb1rw_scheduled(RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
-                                                          size, Q_half, K_half, V_half, nWarpPerBlock)
+                                                          size, Q_half, K_half, V_half, nWarpPerBlock, check_sm_active_time)
       elif args.alg == '1tb1rw_scheduled_permuteV':
         print("using 1tb1rw_scheduled_permuteV")
         time, fusedR, sddmm_result = TCFMM.f3s_1tb1rw_scheduled_permuteV(RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 

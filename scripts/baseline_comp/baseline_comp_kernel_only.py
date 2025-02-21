@@ -97,9 +97,11 @@ def event_timing_decorator(kernel, graphInfo, perf):
       end_event.record()
       end_event.synchronize()
       times.append(start_event.elapsed_time(end_event))
-    execution_time = np.median(times)
-    print(f"{kernel.__name__} median execution time: {execution_time} ms")
-    perf.pd.loc[graphInfo.name, kernel.__name__] = execution_time
+    median_time = np.median(times)
+    avg_time = np.average(times)
+    std_time = np.std(times)
+    print(f"{kernel.__name__} median execution time: {median_time} ms, avg execution time: {avg_time} ms, std execution time: {std_time} ms")
+    perf.pd.loc[graphInfo.name, kernel.__name__] = median_time
     return out
   return wrapper
 
@@ -113,9 +115,11 @@ def timing_decorator(kernel, graphInfo, perf):
     for i in range(niter):
       output = kernel(*args, **kwargs)
       times.append(output[0].item())
-    avg_time = np.median(times)
-    print(f"{kernel.__name__} median execution time: {avg_time} ms")
-    perf.pd.loc[graphInfo.name, kernel.__name__] = avg_time
+    median_time = np.median(times)
+    avg_time = np.average(times)
+    std_time = np.std(times)
+    print(f"{kernel.__name__} median execution time: {median_time} ms, avg execution time: {avg_time} ms, std execution time: {std_time} ms")
+    perf.pd.loc[graphInfo.name, kernel.__name__] = median_time
     return output
   return wrapper
 
