@@ -21,7 +21,7 @@ df = np.zeros([num_graph, len(columns)])
 def load_dataset(dataset_name):
   print(f"===========loading dataset: {dataset_name}===========")
   # Check available GPU memory before loading dataset
-  path = f"/workspace/washington/F3s-dataset/{dataset_name}.npz"
+  path = f"/share/crsp/lab/amowli/share/Fused3S/dataset/{dataset_name}.npz"
   dataset = np.load(path)
   src_li = dataset['src_li'] # this can contain duplicate edges
   dst_li = dataset['dst_li']
@@ -78,18 +78,25 @@ for i, dataset in enumerate(datasets):
   variance_nnz_per_block = sum([(x - avg_nnz_per_block) ** 2 for x in nnzPerBlock]) / len(nnzPerBlock)
   variance_block_per_row_window = sum([(x - avg_block_per_row_window) ** 2 for x in nBlockPerRowWindow]) / len(nBlockPerRowWindow)  
   median_nnz_per_block = np.median(nnzPerBlock)
+  std_nnz_per_block = np.std(nnzPerBlock)
+  rsd_nnz_per_block = std_nnz_per_block / avg_nnz_per_block
   first_quartile_nnz_per_block = np.percentile(nnzPerBlock, 25)
   third_quartile_nnz_per_block = np.percentile(nnzPerBlock, 75)
   median_block_per_row_window = np.median(nBlockPerRowWindow)
+  std_block_per_row_window = np.std(nBlockPerRowWindow)
+  rsd_block_per_row_window = std_block_per_row_window / avg_block_per_row_window
   first_quartile_block_per_row_window = np.percentile(nBlockPerRowWindow, 25)
   third_quartile_block_per_row_window = np.percentile(nBlockPerRowWindow, 75)
   print("avg_nnz_per_block: ", avg_nnz_per_block)
   print("variance_nnz_per_block: ", variance_nnz_per_block)
   print("median_nnz_per_block: ", median_nnz_per_block)
+  print("rsd_nnz_per_block: ", rsd_nnz_per_block)
   print("first_quartile_nnz_per_block: ", first_quartile_nnz_per_block)
   print("third_quartile_nnz_per_block: ", third_quartile_nnz_per_block)
+  print("")
   print("avg_block_per_row_window: ", avg_block_per_row_window)
   print("variance_block_per_row_window: ", variance_block_per_row_window)
+  print("rsd_block_per_row_window: ", rsd_block_per_row_window)
   print("median_block_per_row_window: ", median_block_per_row_window)
   print("first_quartile_block_per_row_window: ", first_quartile_block_per_row_window)
   print("third_quartile_block_per_row_window: ", third_quartile_block_per_row_window)

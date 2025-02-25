@@ -147,7 +147,8 @@ f3sCuda1tb1rwScheduled(
     int embeddingDim,
     torch::Tensor Q, torch::Tensor K, torch::Tensor V,
     int nWarpPerBlock,
-    bool permuteV);
+    bool permuteV,
+    float scalingFactor);
 
 std::vector<torch::Tensor> 
 sddmmCuda1tbnrw(
@@ -231,10 +232,12 @@ f3s1tb1rwScheduled(
                                   embeddingDim, 
                                   Q, K, V, 
                                   nWarpPerBlock,
-                                  false);
+                                  false,
+                                  1.0);
   }
   return result;
 }
+
 // same as f3s1tb1rwScheduled except permute V = true
 std::vector<torch::Tensor>
 f3s1tb1rwScheduledPermuteV(
@@ -255,7 +258,34 @@ f3s1tb1rwScheduledPermuteV(
                                   embeddingDim, 
                                   Q, K, V, 
                                   nWarpPerBlock,
-                                  true);
+                                  true,
+                                  1.0);
+  return result;
+}
+
+// same as f3s1tb1rwScheduled except permute V = true
+std::vector<torch::Tensor>
+f3s1tb1rwScheduledPermuteVScaleQK(
+    torch::Tensor rowWindowOffset,
+    torch::Tensor sortedRowWindows,
+    torch::Tensor sparseAToXidx,
+    torch::Tensor tcbBitMap,
+    int nNodes,
+    torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+    float scalingFactor,
+    int nWarpPerBlock){
+  int embeddingDim = Q.size(1);
+  std::vector<torch::Tensor> result;
+  result = f3sCuda1tb1rwScheduled(rowWindowOffset, 
+                                  sortedRowWindows, 
+                                  sparseAToXidx, 
+                                  tcbBitMap, 
+                                  nNodes, 
+                                  embeddingDim, 
+                                  Q, K, V, 
+                                  nWarpPerBlock,
+                                  true,
+                                  scalingFactor);
   return result;
 }
 
@@ -324,5 +354,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("f3s_1tb1rw", &f3s1tb1rw, "fused3S 1tb1rw");
   m.def("f3s_1tb1rw_scheduled", &f3s1tb1rwScheduled, "fused3S 1tb1rw scheduled");
   m.def("f3s_1tb1rw_scheduled_permuteV", &f3s1tb1rwScheduledPermuteV, "fused3S 1tb1rw scheduled permuteV");
+  m.def("f3s_1tb1rw_scheduled_permuteV_scaleQK", &f3s1tb1rwScheduledPermuteVScaleQK, "fused3S 1tb1rw scheduled permuteV scaleQK");
   m.def("sddmm_1tbnrw", &sddmm1tbnrw, "sddmm 1tbnrw");
 }

@@ -2,7 +2,7 @@ import torch
 from DFGNN.layers import load_prepfunc
 from DFGNN.layers.util import preprocess_softmax, preprocess_CSR
 from DFGNN.operators.fused_gtconv import GTConvFuse_inference_softmax, GTConvFuse_inference_csr, GTConvFuse_inference_hyper
-from dgl.data import (CoraGraphDataset, CiteseerGraphDataset, PubmedGraphDataset)
+from dgl.data import (CoraGraphDataset, CiteseerGraphDataset, PubmedGraphDataset, RedditDataset)
 import argparse
 import TCFMM
 
@@ -34,6 +34,8 @@ def main(args):
     dataset = PubmedGraphDataset(raw_dir=dataset_dir)
   elif args.dataset == "cora":
     dataset = CoraGraphDataset(raw_dir=dataset_dir)
+  elif args.dataset == "reddit":
+    dataset = RedditDataset(raw_dir=dataset_dir)
   else:
     raise ValueError(f"Invalid dataset: {args.dataset}")
 
@@ -80,7 +82,7 @@ if __name__ == "__main__":
                         choices=["softmax", "csr", "hyper"],
                         help='Format to use')
     parser.add_argument('--dataset', '-d', type=str, default="pubmed",
-                       choices=["citeseer", "pubmed", "cora"],
+                       choices=["citeseer", "pubmed", "cora", "reddit"],
                        help='Dataset to use')
     args = parser.parse_args()
     main(args)

@@ -19,7 +19,7 @@ setup(
               '-prec-div=false',
               '-prec-sqrt=false',
               '-lineinfo',
-              '-arch=sm_80',
+            #   '-arch=sm_80',
               # '-Xptxas', '-v',
               ]
         }),

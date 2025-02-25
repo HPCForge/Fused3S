@@ -7,3 +7,6 @@
 [submodule "baselines/flashSparse"]
 	path = baselines/flashSparse
 	url = git@github.com:anonymous2024111/anonymous.git
+[submodule "baselines/graphtransformer"]
+	path = baselines/graphtransformer
+	url = git@github.com:zli96/graphtransformer.git
