@@ -53,7 +53,7 @@ def plot_sm_activities(scheduled_data, unscheduled_data, scheduled_max, unschedu
     ax1.bar(x, scheduled_data)
     ax1.set_xlabel('SM Index', fontsize=VIZ_PARAMS['font_sizes']['xlabel'])
     ax1.set_ylabel('SM Active Time (ms)', fontsize=VIZ_PARAMS['font_sizes']['ylabel'])
-    ax1.set_title('Scheduled', fontsize=VIZ_PARAMS['font_sizes']['title'], 
+    ax1.set_title('Row Window Reordering', fontsize=VIZ_PARAMS['font_sizes']['title'], 
                  pad=VIZ_PARAMS['title_padding'])
     ax1.grid(True, axis='y', alpha=VIZ_PARAMS['grid_alpha'])
     mean_val = np.mean(scheduled_data)
@@ -69,7 +69,7 @@ def plot_sm_activities(scheduled_data, unscheduled_data, scheduled_max, unschedu
     # Plot unscheduled data
     ax2.bar(x, unscheduled_data)
     ax2.set_xlabel('SM Index', fontsize=VIZ_PARAMS['font_sizes']['xlabel'])
-    ax2.set_title('Unscheduled', fontsize=VIZ_PARAMS['font_sizes']['title'], 
+    ax2.set_title('Default', fontsize=VIZ_PARAMS['font_sizes']['title'], 
                  pad=VIZ_PARAMS['title_padding'])
     ax2.grid(True, axis='y', alpha=VIZ_PARAMS['grid_alpha'])
     mean_val = np.mean(unscheduled_data)
@@ -100,8 +100,8 @@ def plot_sm_activities(scheduled_data, unscheduled_data, scheduled_max, unschedu
 
 def main(args):
     # File paths
-    scheduled_file = f'SM_time_f3s1tb1rw_scheduled_{args.dataset}.csv'
-    unscheduled_file = f'SM_time_f3s1tb1rw_{args.dataset}.csv'
+    scheduled_file = f'SM_active_time_results/SM_time_f3s1tb1rw_scheduled_{args.dataset}.csv'
+    unscheduled_file = f'SM_active_time_results/SM_time_f3s1tb1rw_{args.dataset}.csv'
     
     # Process data
     scheduled_data, scheduled_max = read_data(scheduled_file)
