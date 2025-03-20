@@ -217,7 +217,7 @@ __global__ void generate_tcoffset_id_atob(
     unsigned row_local = edgeToRow[e_index] % blockSize_h;
     unsigned col_local = col % blockSize_w;
     tileid[tcblock_offset_ptr[tcblock_id] + pos_ptr[tcblock_id]] =
-        (uint8_t)(row_local * blockSize_w + col_local);
+        (uint8_t)(col_local * blockSize_h + row_local);
     update_bitmap(tcblock_bit_map, block_start + tcblock_id, n_sub_blocks_per_tcblock, blockSize_w, blockSize_h, row_local, col_local);
     sparse_AToB[tcblock_id * blockSize_w + col_local] = edgeList[e_index];
     pos_ptr[tcblock_id]++;
