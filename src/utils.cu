@@ -27,10 +27,10 @@ __device__ void update_bitmap(uint64_t* bitmap,
   int n_sub_blocks_per_row = blockSize_w / 8;
   int n_sub_blocks_per_col = blockSize_h / 8;
   unsigned long long int *ull_bitmap = reinterpret_cast<unsigned long long int*>(bitmap);
-  int sub_block_row_id = row_local / 8;
-  int sub_block_col_id = col_local / 8;
-  int sub_block_id = sub_block_col_id * n_sub_blocks_per_col + sub_block_row_id;
-  int sub_block_local_id = row_local % 8 * 8 + col_local % 8;
+  int sub_block_row_id = col_local / 8; //swapped
+  int sub_block_col_id = row_local / 8; //swapped
+  int sub_block_id = sub_block_col_id * n_sub_blocks_per_row + sub_block_row_id; //n_sub_blocks_per_row now derived from blockSize_h
+  int sub_block_local_id = (col_local % 8) * 8 + (row_local % 8); //swapped
   uint64_t mask = 1ULL << (63 - sub_block_local_id);
   atomicOr(&ull_bitmap[tcblock_id * n_sub_blocks_per_tcblock + sub_block_id], mask);
 }
@@ -217,7 +217,7 @@ __global__ void generate_tcoffset_id_atob(
     unsigned row_local = edgeToRow[e_index] % blockSize_h;
     unsigned col_local = col % blockSize_w;
     tileid[tcblock_offset_ptr[tcblock_id] + pos_ptr[tcblock_id]] =
-        (uint8_t)(col_local * blockSize_h + row_local);
+        (uint8_t)(col_local * blockSize_h + row_local); //transpose the operand layout in the TC block
     update_bitmap(tcblock_bit_map, block_start + tcblock_id, n_sub_blocks_per_tcblock, blockSize_w, blockSize_h, row_local, col_local);
     sparse_AToB[tcblock_id * blockSize_w + col_local] = edgeList[e_index];
     pos_ptr[tcblock_id]++;
