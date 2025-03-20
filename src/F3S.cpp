@@ -349,7 +349,6 @@ f3s1tb1tcb(torch::Tensor rowWindowOffset,
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("preprocess_gpu", &preprocess_gpu, "Preprocess Step on (CUDA)");
-  // m.def("fusedMM_forward", &fusedMM_forward, "FusedMM forward (CUDA)");
   m.def("f3s_1tb1tcb", &f3s1tb1tcb, "fused3S 1tb1tcb");
   m.def("f3s_1tb1rw", &f3s1tb1rw, "fused3S 1tb1rw");
   m.def("f3s_1tb1rw_scheduled", &f3s1tb1rwScheduled, "fused3S 1tb1rw scheduled");

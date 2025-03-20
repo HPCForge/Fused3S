@@ -9,5 +9,5 @@ scripts/pushToHpc3.sh
 scripts/pullFromHpc3.sh
 src/build
 **/dist
-**/TCFMM.egg-info
+**/F3S.egg-info
 test/

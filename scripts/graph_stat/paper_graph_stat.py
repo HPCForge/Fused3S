@@ -7,7 +7,7 @@ BLK_H = 16
 BLK_W = 8
 import numpy as np
 from scipy.sparse import coo_matrix
-from TCFMM import preprocess_gpu
+from F3S import preprocess_gpu
 
 datasets = ["reddit", "amazonProducts", "yelp", "amazon0505", 
             "Artist", "Blog", "com-amazon.ungraph", "github", 

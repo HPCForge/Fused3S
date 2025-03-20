@@ -446,17 +446,17 @@ def route_f3s(args, graphInfo, perf):
   Q = torch.rand(graphInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
   K = torch.rand(graphInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
   V = torch.rand(graphInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
-  import TCFMM
+  import F3S
   if args.use_cuda_event:
-    f3s_1tb1rw = timing_decorator(TCFMM.f3s_1tb1rw, "f3s_1tb1rw", graphInfo, perf)
-    f3s_1tb1rw_scheduled= timing_decorator(TCFMM.f3s_1tb1rw_scheduled, "f3s_1tb1rw_scheduled", graphInfo, perf)
-    f3s_1tb1rw_scheduled_permuteV = timing_decorator(TCFMM.f3s_1tb1rw_scheduled_permuteV, "f3s_1tb1rw_scheduled_permuteV", graphInfo, perf)
-    f3s_1tb1tcb = timing_decorator(TCFMM.f3s_1tb1tcb, "f3s_1tb1tcb", graphInfo, perf)
+    f3s_1tb1rw = timing_decorator(F3S.f3s_1tb1rw, "f3s_1tb1rw", graphInfo, perf)
+    f3s_1tb1rw_scheduled= timing_decorator(F3S.f3s_1tb1rw_scheduled, "f3s_1tb1rw_scheduled", graphInfo, perf)
+    f3s_1tb1rw_scheduled_permuteV = timing_decorator(F3S.f3s_1tb1rw_scheduled_permuteV, "f3s_1tb1rw_scheduled_permuteV", graphInfo, perf)
+    f3s_1tb1tcb = timing_decorator(F3S.f3s_1tb1tcb, "f3s_1tb1tcb", graphInfo, perf)
   else:
-    f3s_1tb1rw = TCFMM.f3s_1tb1rw
-    f3s_1tb1rw_scheduled = TCFMM.f3s_1tb1rw_scheduled
-    f3s_1tb1rw_scheduled_permuteV = TCFMM.f3s_1tb1rw_scheduled_permuteV
-    f3s_1tb1tcb = TCFMM.f3s_1tb1tcb
+    f3s_1tb1rw = F3S.f3s_1tb1rw
+    f3s_1tb1rw_scheduled = F3S.f3s_1tb1rw_scheduled
+    f3s_1tb1rw_scheduled_permuteV = F3S.f3s_1tb1rw_scheduled_permuteV
+    f3s_1tb1tcb = F3S.f3s_1tb1tcb
 
   if args.alg == 'f3s_1tb1tcb' or args.alg == 'all':
     RowWindowOffset, sortedRowWindows, TCblockRowid,\
@@ -502,7 +502,7 @@ def route_f3s(args, graphInfo, perf):
       print(f"Error in f3s_1tb1rw_scheduled_permuteV: {e}")
 
 def f3s_preprocess_dataset(args, graphInfo, BLK_W):
-  from TCFMM import preprocess_gpu
+  from F3S import preprocess_gpu
   BLK_H = 16
   # Set up tensors for preprocessing
   num_row_windows = (graphInfo.num_nodes + BLK_H - 1) // BLK_H

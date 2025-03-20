@@ -6,10 +6,6 @@
 #include <mma.h>
 #include <sstream>
 #include <stdio.h>
-// #include <thrust/device_vector.h>
-// #include <thrust/host_vector.h>
-// #include <thrust/sort.h>
-// #include <thrust/unique.h>
 #include <torch/extension.h>
 #include <vector>
 #include "ptx.h"
@@ -241,44 +237,6 @@ __device__ void setQFragShm(float* dynShm, uint64_t* Q, int bid, int warpId, int
     Q_frag[blockDim.x*3 + laneId] = static_cast<uint32_t>(val >> 32);
   }
 }
-
-// __global__ void TC_fusedMM_cuda_kernel(
-// 	const int *__restrict__ TCblock_rowid, 		 // offset of each row window.
-// 	const uint8_t *__restrict__ TCblocktile_id,  // id of each TC block nonzero element.
-// 	const int *__restrict__ TCblock_offset,      // colid of each TC block nonzero element.
-// 	const int *__restrict__ sparse_AToX_idx,     // colid of each TC block nonzero element.
-// 	const int numNodes, const int numEdges,
-// 	const int embeddingDim,    // embedding dimension.
-// 	float *__restrict__ in_mat, // input feature matrix.
-// 	float *output,              // aggreAGNNed output feature matrix.
-// 	torch::Half *edgeAttention, // result of SDDMM.
-// 	bool save_edge_attention
-// );
-// __global__ void TC_fusedMM_fp32_inter_cuda_kernel(
-// 	const int *__restrict__ TCblock_rowid, 		 // offset of each row window.
-// 	const uint8_t *__restrict__ TCblocktile_id,  // id of each TC block nonzero element.
-// 	const int *__restrict__ TCblock_offset,      // colid of each TC block nonzero element.
-// 	const int *__restrict__ sparse_AToX_idx,     // colid of each TC block nonzero element.
-// 	const int numNodes, const int numEdges,
-// 	const int embeddingDim,    // embedding dimension.
-// 	torch::Half *__restrict__ in_mat, // input feature matrix.
-// 	float *output,              // aggreAGNNed output feature matrix.
-// 	float *edgeAttention, // result of SDDMM.
-// 	bool save_edge_attention
-// );
-#if BLK_M == 8 && BLK_N == 32 && BLK_K == 16
-__global__ void TC_fusedMM_fp32_inter_m8n32k16_cuda_kernel(
-		const int *__restrict__ TCblock_rowid, 		 // offset of each row window.
-		const uint8_t *__restrict__ TCblocktile_id,  // id of each TC block nonzero element.
-		const int *__restrict__ TCblock_offset,      // colid of each TC block nonzero element.
-		const int *__restrict__ sparse_AToX_idx,     // colid of each TC block nonzero element.
-		const int numNodes, const int numEdges,
-		const int embeddingDim,    // embedding dimension.
-		torch::Half *__restrict__ in_mat, // input feature matrix.
-		float *output,              // aggreAGNNed output feature matrix.
-		float *edgeAttention, // result of SDDMM.
-		bool save_edge_attention);
-#endif
 
 __global__ void f3sKernel1tb1tcb(
 		const int *__restrict__ rowWindowOffset, 		 // offset of each row window.
@@ -1670,9 +1628,6 @@ __global__ void f3sKernel1tb1rwScheduledPermutedQKV(
             B_frag[k] = (temp[0] & 0xFFFF) | ((temp[1] & 0xFFFF) << 16);
             B_frag[k+2] = (temp[0] >> 16) | ((temp[1] >> 16) << 16);
           }
-          // if(bid == 0 && i==7){
-          //   printf("laneId: %d, B_frag: %d %d %d %d\n", laneId, B_frag[0], B_frag[1], B_frag[2], B_frag[3]);
-          // }
           //load E
           int eOffset = (embeddingDim+j*BLK_M)*BLK_M/2 + laneId;
           loadEFragShm(E_frag, reinterpret_cast<uint32_t*>(dynShm1tb1rw)+eOffset);
@@ -1686,9 +1641,6 @@ __global__ void f3sKernel1tb1rwScheduledPermutedQKV(
                     O_frag[4], O_frag[5], O_frag[6], O_frag[7]);
         }
         storeOFragShm2(O_frag, warpOPtr);
-        // if(bid == 0 && i == 7 && laneId == 0){
-        //   printf("O_frag: %f %f %f %f %f %f %f %f\n", O_frag[0], O_frag[1], O_frag[2], O_frag[3], O_frag[4], O_frag[5], O_frag[6], O_frag[7]);
-        // }
       }
     }
   }
@@ -1709,9 +1661,6 @@ __global__ void f3sKernel1tb1rwScheduledPermutedQKV(
     val.y = oPtr[128] * invR0;
     val.z = oPtr[32] * invR0;
     val.w = oPtr[160] * invR0;
-    // if(bid == 0 && i == 7 && laneId == 0){
-    //   printf("val: %f %f %f %f\n", val.x, val.y, val.z, val.w);
-    // }
     output_float4[(outputOffset + i*BLK_M)/4] = val;
     val.x = oPtr[64] * invR1;
     val.y = oPtr[192] * invR1;
@@ -1895,9 +1844,6 @@ __global__ void f3sKernel1tb1rwScheduledPermutedQKVScaleQK(
             B_frag[k] = (temp[0] & 0xFFFF) | ((temp[1] & 0xFFFF) << 16);
             B_frag[k+2] = (temp[0] >> 16) | ((temp[1] >> 16) << 16);
           }
-          // if(bid == 0 && i==7){
-          //   printf("laneId: %d, B_frag: %d %d %d %d\n", laneId, B_frag[0], B_frag[1], B_frag[2], B_frag[3]);
-          // }
           //load E
           int eOffset = (embeddingDim+j*BLK_M)*BLK_M/2 + laneId;
           loadEFragShm(E_frag, reinterpret_cast<uint32_t*>(dynShm1tb1rw)+eOffset);
@@ -1911,9 +1857,6 @@ __global__ void f3sKernel1tb1rwScheduledPermutedQKVScaleQK(
                     O_frag[4], O_frag[5], O_frag[6], O_frag[7]);
         }
         storeOFragShm2(O_frag, warpOPtr);
-        // if(bid == 0 && i == 7 && laneId == 0){
-        //   printf("O_frag: %f %f %f %f %f %f %f %f\n", O_frag[0], O_frag[1], O_frag[2], O_frag[3], O_frag[4], O_frag[5], O_frag[6], O_frag[7]);
-        // }
       }
     }
   }
@@ -1934,9 +1877,6 @@ __global__ void f3sKernel1tb1rwScheduledPermutedQKVScaleQK(
     val.y = oPtr[128] * invR0;
     val.z = oPtr[32] * invR0;
     val.w = oPtr[160] * invR0;
-    // if(bid == 0 && i == 7 && laneId == 0){
-    //   printf("val: %f %f %f %f\n", val.x, val.y, val.z, val.w);
-    // }
     output_float4[(outputOffset + i*BLK_M)/4] = val;
     val.x = oPtr[64] * invR1;
     val.y = oPtr[192] * invR1;
@@ -2328,7 +2268,7 @@ __global__ void f3sKernel1tb1rwScheduled(
 }
 
 // Each warp computes 1 tcb of S.
-// TODO: right now we need at least 2 warps per block because we need 2 tcbs to go to the spmm stage.
+// Assumption: At least 2 warps per block because we need 2 tcbs to go to the spmm stage.
 __global__ void f2sKernel1tb1rw(
     const int *__restrict__ rowWindowOffset,
     const int *__restrict__ sparseAToXidx, 
@@ -2519,4 +2459,3 @@ __global__ void sddmmKernel1tbnrw(
     }
   }
 }
-// #endif
