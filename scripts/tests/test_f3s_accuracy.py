@@ -136,6 +136,8 @@ def main(args):
 
     # Round and convert all non-zero entries to 1
     A_csr_h.data = np.ceil(A_csr_h.data, dtype=np.float32)
+    A_csr_h = A_csr_h.transpose().tocsr()  # Now A_csr_h is the CSR for A^T
+
     A_dense = torch.tensor(A_csr_h.todense()).cuda()
     A_dense_half = A_dense.to(torch.float16)
 
@@ -188,8 +190,10 @@ def main(args):
     blockPartition_cuda  = blockPartition.cuda()
     edgeToColumn_cuda = edgeToColumn.cuda()
     edgeToRow_cuda  = edgeToRow.cuda()
-    indptr = torch.IntTensor(A_csr_h.indices).cuda()
-    indices = torch.IntTensor(A_csr_h.indptr).cuda()
+    indptr = torch.IntTensor(A_csr_h.indptr).cuda()   # Use indptr from A^T
+    indices = torch.IntTensor(A_csr_h.indices).cuda()   # Use indices from A^T
+    # indptr = torch.IntTensor(A_csr_h.indices).cuda()
+    # indices = torch.IntTensor(A_csr_h.indptr).cuda()
     RowWindowOffset, sortedRowWindows, TCblockRowid,\
     TCblocktileId, TCblockoffset, SparseAToXindex,\
     TBBoundaries, TCblockBitMap, block_count = F3S.preprocess_gpu(indptr, indices, size, 
