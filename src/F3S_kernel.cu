@@ -622,9 +622,10 @@ f3sCuda1tb1rwScheduled(
     bool permuteV,
     float scalingFactor){
   uint64_t nTcb = sparseAToXidx.size(0)/BLK_M;
-  // int64_t sddmmResultSize = nTcb*BLK_M*BLK_M;
-	// torch::Tensor sddmmResult = torch::zeros({sddmmResultSize}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)); 
-  torch::Tensor sddmmResult = torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  // to call sddmm in the python script (626, 627)
+  int64_t sddmmResultSize = nTcb*BLK_M*BLK_M;
+  torch::Tensor sddmmResult = torch::zeros({sddmmResultSize}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)); 
+  // torch::Tensor sddmmResult = torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
   float2* sddmmResultPtr = reinterpret_cast<float2*>(sddmmResult.data_ptr<float>());
   int nRowWindow = rowWindowOffset.size(0) - 1;
   int paddedLength = nRowWindow * BLK_M; 
@@ -1145,16 +1146,16 @@ __global__ void f3sKernel1tb1rw(
           S_frag[i] = (tcbBitMap[warpTcbId*4+(warpId%2)*2+i/2] & bitMask) == 0 ? 0.0f : S_frag[i];
         }
       }
-      // {//save sddmm result
-      //   int offset = warpTcbId*BLK_M*BLK_M + (warpId%2)*BLK_M*BLK_N + laneId*2;
-      //   for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
-      //     int sumOffset = j*BLK_N*BLK_N;
-      //     float2 val;
-      //     val.x = S_frag[j*2];
-      //     val.y = S_frag[j*2+1];
-      //     sddmmResult[(offset + sumOffset)/2] = val;
-      //   }
-      // }
+      {//save sddmm result
+        int offset = warpTcbId*BLK_M*BLK_M + (warpId%2)*BLK_M*BLK_N + laneId*2;
+        for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
+          int sumOffset = j*BLK_N*BLK_N;
+          float2 val;
+          val.x = S_frag[j*2];
+          val.y = S_frag[j*2+1];
+          sddmmResult[(offset + sumOffset)/2] = val;
+        }
+      }
       {//online softmax
         float* maxPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2 + laneId/4 + blockDim.y*BLK_M;
         //save max of each row within the warp to shared memory for cross-warp communication
@@ -1496,7 +1497,7 @@ __global__ void f3sKernel1tb1rwScheduledPermutedQKV(
   }
   //BLK_M/2 because each thread loads 2 128b elements
   for(int i = tid; i < (BLK_M/2)*embeddingDim/8; i += blockDim.x*blockDim.y){
-    loadQHbm2Shm128b(dynShm1tb1rw, Q+scheduler.targetRw*BLK_M*embeddingDim/8, embeddingDim, i);
+    loadQHbm2Shm128b(dynShm1tb1rw, Q+scheduler.targetRw*BLK_M*embeddingDim/8, embeddingDim, i); // replace Q with K
   }
   __syncthreads();
   for(int iter = 0; iter < niter; iter++){
@@ -1511,8 +1512,8 @@ __global__ void f3sKernel1tb1rwScheduledPermutedQKV(
                       * embeddingDim/8 + laneId % 4;
         for(int i = 0; i < embeddingDim/BLK_K; i+=2) {
           //load K with permuted columns
-          ulonglong2 val = K[kOffset + i*BLK_K/8];
-          uint64_t Q_frag[2];
+          ulonglong2 val = K[kOffset + i*BLK_K/8]; // change K to Q
+          uint64_t Q_frag[2]; // change to K_frag
           loadQFragShm(Q_frag, dynShm1tb1rw, i, laneId);
           HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
                     static_cast<uint32_t>(Q_frag[0] & 0xFFFFFFFFull), 
@@ -1538,16 +1539,16 @@ __global__ void f3sKernel1tb1rwScheduledPermutedQKV(
           S_frag[i] = (tcbBitMap[warpTcbId*4+(warpId%2)*2+i/2] & bitMask) == 0 ? 0.0f : S_frag[i];
         }
       }
-      // {//save sddmm result
-      //   int offset = warpTcbId*BLK_M*BLK_M + (warpId%2)*BLK_M*BLK_N + laneId*2;
-      //   for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
-      //     int sumOffset = j*BLK_N*BLK_N;
-      //     float2 val;
-      //     val.x = S_frag[j*2];
-      //     val.y = S_frag[j*2+1];
-      //     sddmmResult[(offset + sumOffset)/2] = val;
-      //   }
-      // }
+      {//save sddmm result
+        int offset = warpTcbId*BLK_M*BLK_M + (warpId%2)*BLK_M*BLK_N + laneId*2;
+        for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
+          int sumOffset = j*BLK_N*BLK_N;
+          float2 val;
+          val.x = S_frag[j*2];
+          val.y = S_frag[j*2+1];
+          sddmmResult[(offset + sumOffset)/2] = val;
+        }
+      }
       {//online softmax
         float* maxPtr = reinterpret_cast<float*>(dynShm1tb1rw) + (embeddingDim + blockDim.y*BLK_N)*BLK_M/2 + laneId/4 + blockDim.y*BLK_M;
         //save max of each row within the warp to shared memory for cross-warp communication
@@ -2342,16 +2343,16 @@ __global__ void f2sKernel1tb1rw(
           S_frag[i] = (tcbBitMap[warpTcbId*4+(warpId%2)*2+i/2] & bitMask) == 0 ? 0.0f : S_frag[i];
         }
       }
-      // {//save sddmm result
-      //   int offset = warpTcbId*BLK_M*BLK_M + (warpId%2)*BLK_M*BLK_N + laneId*2;
-      //   for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
-      //     int sumOffset = j*BLK_N*BLK_N;
-      //     float2 val;
-      //     val.x = S_frag[j*2];
-      //     val.y = S_frag[j*2+1];
-      //     sddmmResult[(offset + sumOffset)/2] = val;
-      //   }
-      // }
+    //   {//save sddmm result
+    //     int offset = warpTcbId*BLK_M*BLK_M + (warpId%2)*BLK_M*BLK_N + laneId*2;
+    //     for(int j = 0; j < 2; j++){ // 2 8x8 blocks in each 16x8 block
+    //       int sumOffset = j*BLK_N*BLK_N;
+    //       float2 val;
+    //       val.x = S_frag[j*2];
+    //       val.y = S_frag[j*2+1];
+    //       sddmmResult[(offset + sumOffset)/2] = val;
+    //     }
+    //   }
     }
     __syncthreads();
     if(warpTcbId < rowWindowOffset[bid+1]){
@@ -2412,6 +2413,7 @@ __global__ void f2sKernel1tb1rw(
 }
 
 // Each tb computes multiple row windows of S
+// #define bid blockIdx.x // global definition of bid
 __global__ void sddmmKernel1tbnrw(
     const int *__restrict__ rowWindowOffset,
     const int *__restrict__ tbBoundaries,
