@@ -161,8 +161,12 @@ def main(args):
     print(f"V_half.shape: {V_half.shape}")
     K_half_cpu = K_half.to("cpu")
     
-    sddmm_half_og_form = (Q_half @ K_half.T) * A_dense_half
-    sddmm_og_form = (Q @ K.T) * A_dense
+    # sddmm_half_og_form = (Q_half @ K_half.T) * A_dense_half
+    # sddmm_og_form = (Q @ K.T) * A_dense
+
+    sddmm_half_og_form = (K_half @ Q_half.T) * A_dense_half
+    sddmm_og_form = (K @ Q.T) * A_dense
+
     # BLK_M = 16, BLK_N = 8, but BLK_H = 16, BLK_W = 16
     # I'm detaching the size of the output block from the mma block size.
     # This is to deal with odd number of TCBs.
