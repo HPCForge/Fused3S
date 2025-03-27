@@ -1497,7 +1497,7 @@ __global__ void f3sKernel1tb1rwScheduledPermutedQKV(
   }
   //BLK_M/2 because each thread loads 2 128b elements
   for(int i = tid; i < (BLK_M/2)*embeddingDim/8; i += blockDim.x*blockDim.y){
-    loadQHbm2Shm128b(dynShm1tb1rw, Q+scheduler.targetRw*BLK_M*embeddingDim/8, embeddingDim, i); // replace Q with K
+    loadQHbm2Shm128b(dynShm1tb1rw, K+scheduler.targetRw*BLK_M*embeddingDim/8, embeddingDim, i); // replace Q with K
   }
   __syncthreads();
   for(int iter = 0; iter < niter; iter++){
