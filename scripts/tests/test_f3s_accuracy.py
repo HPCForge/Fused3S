@@ -163,7 +163,7 @@ def main(args):
     
     # sddmm_half_og_form = (Q_half @ K_half.T) * A_dense_half
     # sddmm_og_form = (Q @ K.T) * A_dense
-
+    
     sddmm_half_og_form = (K_half @ Q_half.T) * A_dense_half
     sddmm_og_form = (K @ Q.T) * A_dense
 
