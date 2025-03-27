@@ -1511,26 +1511,48 @@ __global__ void f3sKernel1tb1rwScheduledPermutedQKV(
         int kOffset = sparseAToXidx[warpTcbId*BLK_M + (warpId%2)*BLK_N + laneId/4] 
                       * embeddingDim/8 + laneId % 4;
         for(int i = 0; i < embeddingDim/BLK_K; i+=2) {
-          //load K with permuted columns
-          ulonglong2 val = K[kOffset + i*BLK_K/8]; // change K to Q
-          uint64_t Q_frag[2]; // change to K_frag
-          loadQFragShm(Q_frag, dynShm1tb1rw, i, laneId);
-          HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
-                    static_cast<uint32_t>(Q_frag[0] & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(Q_frag[1] & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(Q_frag[0] >> 32), 
-                    static_cast<uint32_t>(Q_frag[1] >> 32), 
-                    static_cast<uint32_t>(val.x & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(val.x >> 32), 
+          // //load K with permuted columns
+          // ulonglong2 val = K[kOffset + i*BLK_K/8]; // change K to Q
+          // uint64_t Q_frag[2]; // change to K_frag
+          // loadQFragShm(Q_frag, dynShm1tb1rw, i, laneId);
+          // HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
+          //           static_cast<uint32_t>(Q_frag[0] & 0xFFFFFFFFull), 
+          //           static_cast<uint32_t>(Q_frag[1] & 0xFFFFFFFFull), 
+          //           static_cast<uint32_t>(Q_frag[0] >> 32), 
+          //           static_cast<uint32_t>(Q_frag[1] >> 32), 
+          //           static_cast<uint32_t>(val.x & 0xFFFFFFFFull), 
+          //           static_cast<uint32_t>(val.x >> 32), 
+          //           S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
+          // loadQFragShm(Q_frag, dynShm1tb1rw, i+1, laneId);
+          // HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
+          //           static_cast<uint32_t>(Q_frag[0] & 0xFFFFFFFFull), 
+          //           static_cast<uint32_t>(Q_frag[1] & 0xFFFFFFFFull), 
+          //           static_cast<uint32_t>(Q_frag[0] >> 32), 
+          //           static_cast<uint32_t>(Q_frag[1] >> 32), 
+          //           static_cast<uint32_t>(val.y & 0xFFFFFFFFull), 
+          //           static_cast<uint32_t>(val.y >> 32), 
+          //           S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
+          ulonglong2 val = Q[kOffset + i * BLK_K/8];
+          // load from shared memory from K 
+          uint64_t K_frag[2];
+          loadQFragShm(K_frag, dynShm1tb1rw, i, laneId);
+          HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3],
+                    static_cast<uint32_t>(K_frag[0] & 0xFFFFFFFFull),
+                    static_cast<uint32_t>(K_frag[1] & 0xFFFFFFFFull),
+                    static_cast<uint32_t>(K_frag[0] >> 32),
+                    static_cast<uint32_t>(K_frag[1] >> 32),
+                    static_cast<uint32_t>(val.x & 0xFFFFFFFFull),
+                    static_cast<uint32_t>(val.x >> 32),
                     S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
-          loadQFragShm(Q_frag, dynShm1tb1rw, i+1, laneId);
-          HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3], 
-                    static_cast<uint32_t>(Q_frag[0] & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(Q_frag[1] & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(Q_frag[0] >> 32), 
-                    static_cast<uint32_t>(Q_frag[1] >> 32), 
-                    static_cast<uint32_t>(val.y & 0xFFFFFFFFull), 
-                    static_cast<uint32_t>(val.y >> 32), 
+          // swap for the next iteration (i+1)
+          loadQFragShm(K_frag, dynShm1tb1rw, i+1, laneId);
+          HMMA16816(S_frag[0], S_frag[1], S_frag[2], S_frag[3],
+                    static_cast<uint32_t>(K_frag[0] & 0xFFFFFFFFull),
+                    static_cast<uint32_t>(K_frag[1] & 0xFFFFFFFFull),
+                    static_cast<uint32_t>(K_frag[0] >> 32),
+                    static_cast<uint32_t>(K_frag[1] >> 32),
+                    static_cast<uint32_t>(val.y & 0xFFFFFFFFull),
+                    static_cast<uint32_t>(val.y >> 32),
                     S_frag[0], S_frag[1], S_frag[2], S_frag[3]);
         }
         int bitIdx = 63 - laneId*2;
