@@ -190,10 +190,10 @@ def main(args):
     blockPartition_cuda  = blockPartition.cuda()
     edgeToColumn_cuda = edgeToColumn.cuda()
     edgeToRow_cuda  = edgeToRow.cuda()
-    indptr = torch.IntTensor(A_csr_h.indptr).cuda()   # Use indptr from A^T
-    indices = torch.IntTensor(A_csr_h.indices).cuda()   # Use indices from A^T
-    # indptr = torch.IntTensor(A_csr_h.indices).cuda()
-    # indices = torch.IntTensor(A_csr_h.indptr).cuda()
+    # indptr = torch.IntTensor(A_csr_h.indptr).cuda()   # Use indptr from A^T
+    # indices = torch.IntTensor(A_csr_h.indices).cuda()   # Use indices from A^T
+    indptr = torch.IntTensor(A_csr_h.indices).cuda()
+    indices = torch.IntTensor(A_csr_h.indptr).cuda()
     RowWindowOffset, sortedRowWindows, TCblockRowid,\
     TCblocktileId, TCblockoffset, SparseAToXindex,\
     TBBoundaries, TCblockBitMap, block_count = F3S.preprocess_gpu(indptr, indices, size, 
