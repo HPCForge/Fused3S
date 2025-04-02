@@ -163,7 +163,7 @@ def main(args):
     
     # sddmm_half_og_form = (Q_half @ K_half.T) * A_dense_half
     # sddmm_og_form = (Q @ K.T) * A_dense
-    
+
     sddmm_half_og_form = (K_half @ Q_half.T) * A_dense_half
     sddmm_og_form = (K @ Q.T) * A_dense
 
@@ -220,6 +220,10 @@ def main(args):
         print("using 1tb1rw_scheduled_permuteV")
         time, fusedR, sddmm_result = F3S.f3s_1tb1rw_scheduled_permuteV(RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
                                                           size, Q_half, K_half, V_half, nWarpPerBlock)
+        print("Kernel launch completed.")
+        print("SDDMM result matrix:")
+        sddmm_matrix = sddmm_result.reshape(4 * 16, 16)
+        print(sddmm_matrix[:10, :10])
       elif args.alg == '1tbnrw':
         print("using 1tbnrw")
         time, sddmm_result = F3S.sddmm_1tbnrw(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, 
@@ -271,8 +275,8 @@ def main(args):
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
-  parser.add_argument("--embedding_size", '-emb', type=int, default=128)
-  parser.add_argument("--size", '-s', type=int, default=1000)
+  parser.add_argument("--embedding_size", '-emb', type=int, default=32)
+  parser.add_argument("--size", '-s', type=int, default=32)
   parser.add_argument("--density", '-d', type=float, default=0.1)
   parser.add_argument("--skip_softmax", action='store_true')
   parser.add_argument("--alg", '-a', type=str, default='1tb1rw_scheduled_permuteV', 
