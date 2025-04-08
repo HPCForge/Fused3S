@@ -188,15 +188,15 @@ def main(args):
     blockPartition_cuda  = blockPartition.cuda()
     edgeToColumn_cuda = edgeToColumn.cuda()
     edgeToRow_cuda  = edgeToRow.cuda()
-    indptr = torch.IntTensor(A_csr_h.indices).cuda()
-    indices = torch.IntTensor(A_csr_h.indptr).cuda()
+    indices = torch.IntTensor(A_csr_h.indices).cuda()
+    indptr = torch.IntTensor(A_csr_h.indptr).cuda()
     RowWindowOffset, sortedRowWindows, TCblockRowid,\
     TCblocktileId, TCblockoffset, SparseAToXindex,\
-    TBBoundaries, TCblockBitMap, block_count = F3S.preprocess_gpu(indptr, indices, size, 
-                                                                    BLK_H, BLK_W, 
-                                                                    blockPartition_cuda, 
-                                                                    edgeToColumn_cuda, 
-                                                                    edgeToRow_cuda)
+    TBBoundaries, TCblockBitMap, block_count = F3S.preprocess_gpu(indices, indptr, size, 
+                                                                  BLK_H, BLK_W, 
+                                                                  blockPartition_cuda, 
+                                                                  edgeToColumn_cuda, 
+                                                                  edgeToRow_cuda)
     for i in range(n_runs):
       if args.alg == '1tb1rw':
         check_sm_active_time = False

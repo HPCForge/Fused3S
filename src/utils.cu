@@ -18,8 +18,8 @@
 /// Preprocessing
 //////////////////////////////////////////////////////////////////////
 // assuming each tcblock can be divided into 8x8 (64 bits) sub-blocks
-// sub_block is organized in column-major order
-// elements inside each sub-block is organized in row-major order
+// sub_blocks are organized in column-major order
+// elements inside each sub-block are organized in row-major order
 __device__ void update_bitmap(uint64_t* bitmap, 
                               int tcblock_id, int n_sub_blocks_per_tcblock, 
                               int blockSize_h, int blockSize_w,

@@ -2,12 +2,11 @@ import argparse
 import torch
 import numpy as np
 import pandas as pd
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, csr_matrix
 from torch_geometric.utils import softmax
 import FS_Block
 import FS_SDDMM
 import FS_SpMM
-import ogb
 from typing import Optional, Union, Tuple, overload
 import math
 import torch_geometric
@@ -20,20 +19,27 @@ from torch_geometric.typing import (
     SparseTensor,
 )
 
+
 # datasets = ["reddit", "amazonProducts", "yelp", "amazon0505", 
 #             "Artist", "Blog", "com-amazon.ungraph", "github", 
 #             "Ell", "ogbn-products", "citeseer", "pubmed", "cora",
 #             "igb_small", "igb_medium"]
 
+# datasets = ["ZINC", "PascalVOC-SP", "COCO-SP", "Peptides-func", "Peptides-struct"]
 datasets = ["citeseer", "cora", "pubmed", "Ell", "github", 
             "Artist", "com-amazon.ungraph", "Blog", 
             "amazon0505", "igb_small", "yelp", "reddit", 
-            "igb_medium", "ogbn-products", "amazonProducts"]
+            "igb_medium", "ogbn-products", "igb_large", "ogbn-papers100M", "amazonProducts", 
+            
+            "ZINC", "PascalVOC-SP", "COCO-SP", "Peptides-func", "Peptides-struct"]
 
 algs = ['f3s_1tb1tcb', 'f3s_1tb1rw', 'f3s_1tb1rw_no_softmax', 
         'f3s_1tb1rw_scheduled', 'f3s_1tb1rw_scheduled_permuteV',
         'flashSparse_no_softmax', 'flashSparse_naive_softmax', 'flashSparse_stable_softmax', 
         'dfgnn_tiling', 'dfgnn_hyper', 'pyg_gtconv']
+
+data_path = "/share/crsp/lab/amowli/share/Fused3S/dataset"
+temp_data_path = "/share/crsp/lab/amowli/share/Fused3S/dataLoader"
 
 def check_gpu_memory():
   if torch.cuda.is_available():
@@ -66,11 +72,9 @@ class Perf:
   def __init__(self, algs, datasets):
     self.runtime_pd = pd.DataFrame(index=datasets, columns=algs)
     self.throughput_pd = pd.DataFrame(index=datasets, columns=algs)
-    self.bandwidth_pd = pd.DataFrame(index=datasets, columns=algs)
     # Set "dataset" as the name for the index
     self.runtime_pd.index.name = "dataset"
     self.throughput_pd.index.name = "dataset"
-    self.bandwidth_pd.index.name = "dataset"
 
 class GraphInfo:
   # adj is a scipy.sparse.csr_matrix
@@ -117,19 +121,14 @@ class GraphInfo:
     #   return False
     # return True
   
-  def dfgnn_flop_and_lgd(self, embedding_dim):
+  def dfgnn_flop(self, embedding_dim):
     sddmm_flops = self.adj.nnz * embedding_dim * 2
     # max, subtract, exp, sum, div. each one is self.adj.nnz flops
     softmax_flops = self.adj.nnz * 5
     spmm_flops = self.adj.nnz * embedding_dim * 2
     self.num_flops_dfgnn = spmm_flops + sddmm_flops + softmax_flops
-    # 2 embedding_dim vector needed to compute each nnz in S, in fp32
-    S = self.adj.nnz * embedding_dim * 2 * 4 
-    # 1 embedding_dim vector needed to compute each element in O, in fp32
-    O = self.adj.nnz * embedding_dim * 4
-    self.lgd_dfgnn = S + O
 
-  def f3s_flop_and_lgd(self, rowWindowOffset, embedding_dim, use_1tb1tcb):
+  def f3s_flop(self, rowWindowOffset, embedding_dim, use_1tb1tcb):
     n_tcb = torch.sum(torch.diff(rowWindowOffset)).item()
     BLK_H = 16
     if use_1tb1tcb:
@@ -140,17 +139,10 @@ class GraphInfo:
     sddmm = nnz * embedding_dim * 2
     softmax = nnz * 5
     spmm = nnz * embedding_dim * 2
-    # f3s global memory access in bytes
-    Q = self.num_nodes * embedding_dim * 2
-    K = n_tcb * BLK_W * embedding_dim * 2
-    V = n_tcb * BLK_W * embedding_dim * 2
-    O = n_tcb * BLK_W * embedding_dim * 4
     if use_1tb1tcb:
       self.num_flops_f3s_1tb1tcb = sddmm + spmm + softmax
-      self.lgd_f3s_1tb1tcb = Q + K + V + O
     else:
       self.num_flops_f3s_1tb1rw = sddmm + spmm + softmax
-      self.lgd_f3s_1tb1rw = Q + K + V + O
 
 # only for flashSparse
 class InputInfo:
@@ -167,7 +159,7 @@ class InputInfo:
     self.num_edges = None
     self.ones = None
 
-  def flashSparse_flop_and_lgd(self, row_pointers, embedding_dim):
+  def flashSparse_flop(self, row_pointers, embedding_dim):
     BLK_H = 16
     BLK_W = 8
     nvectors_each_row_window = torch.diff(row_pointers)
@@ -181,19 +173,11 @@ class InputInfo:
     softmax = nnz * 3
     spmm = nnz * embedding_dim * 2
     self.num_flops_flashSparse = sddmm + spmm + softmax
-    Q = self.num_nodes * embedding_dim * 2
-    K = n_tcb * BLK_H * embedding_dim * 2
-    # *2 because S is wrote into HBM and read back
-    S = n_tcb * BLK_H * BLK_W * 4 * 2 
-    V = n_tcb * BLK_H * embedding_dim * 2
-    O = self.num_nodes * embedding_dim * 4
-    self.lgd_flashSparse = Q + K + S + V + O
 
 def event_timing_decorator(kernel, kernel_name, graphInfo, perf):
   def wrapper(*args, **kwargs):
     times = []
     throughput = []
-    bandwidth = []
     niter = 10
     # warmup
     for i in range(3):
@@ -201,7 +185,6 @@ def event_timing_decorator(kernel, kernel_name, graphInfo, perf):
     torch.cuda.synchronize()
     print(f"{kernel_name} warmup done")
     flop = graphInfo.num_flops_dfgnn
-    lgd = graphInfo.lgd_dfgnn
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     for i in range(niter):
@@ -212,22 +195,16 @@ def event_timing_decorator(kernel, kernel_name, graphInfo, perf):
       times.append(start_event.elapsed_time(end_event))
       # x1000 to convert to FLOPS and B/s since time is in ms
       throughput.append(flop*1000 / times[-1])
-      bandwidth.append(lgd*1000 / times[-1])
     median_time = np.median(times)
     avg_time = np.average(times)
     std_time = np.std(times)
     median_throughput = np.median(throughput)
     avg_throughput = np.average(throughput)
     std_throughput = np.std(throughput)
-    median_bandwidth = np.median(bandwidth)
-    avg_bandwidth = np.average(bandwidth)
-    std_bandwidth = np.std(bandwidth)
     print(f"{kernel_name} execution time (ms). median: {median_time}, average: {avg_time}, standard deviation: {std_time}")
     print(f"{kernel_name} throughput (FLOPS). median: {median_throughput}, average: {avg_throughput}, standard deviation: {std_throughput}")
-    print(f"{kernel_name} bandwidth (B/s). median: {median_bandwidth}, average: {avg_bandwidth}, standard deviation: {std_bandwidth}")
     perf.runtime_pd.loc[graphInfo.name, kernel_name] = median_time
     perf.throughput_pd.loc[graphInfo.name, kernel_name] = median_throughput
-    perf.bandwidth_pd.loc[graphInfo.name, kernel_name] = median_bandwidth
     return out
   return wrapper
 
@@ -235,23 +212,18 @@ def timing_decorator(kernel, kernel_name, graphInfo, perf):
   def wrapper(*args, **kwargs):
     times = []
     throughput = []
-    bandwidth = []
     niter = 10
     flop = 0
-    lgd = 0
     if kernel_name == "flashSparse_stable_softmax" \
     or kernel_name == "flashSparse_naive_softmax" \
     or kernel_name == "flashSparse_no_softmax":
       flop = graphInfo.num_flops_flashSparse
-      lgd = graphInfo.lgd_flashSparse
     elif kernel_name == "f3s_1tb1rw" \
     or kernel_name == "f3s_1tb1rw_scheduled" \
     or kernel_name == "f3s_1tb1rw_scheduled_permuteV":
       flop = graphInfo.num_flops_f3s_1tb1rw
-      lgd = graphInfo.lgd_f3s_1tb1rw
     elif kernel_name == "f3s_1tb1tcb":
       flop = graphInfo.num_flops_f3s_1tb1tcb
-      lgd = graphInfo.lgd_f3s_1tb1tcb
     else:
       raise ValueError(f"Unknown kernel name: {kernel_name}")
     # warmup
@@ -262,22 +234,16 @@ def timing_decorator(kernel, kernel_name, graphInfo, perf):
       times.append(output[0].item())
       # x1000 to convert to FLOPS and B/s since time is in ms
       throughput.append(flop*1000 / times[-1])
-      bandwidth.append(lgd*1000 / times[-1])
     median_time = np.median(times)
     avg_time = np.average(times)
     std_time = np.std(times)
     median_throughput = np.median(throughput)
     avg_throughput = np.average(throughput)
     std_throughput = np.std(throughput)
-    median_bandwidth = np.median(bandwidth)
-    avg_bandwidth = np.average(bandwidth)
-    std_bandwidth = np.std(bandwidth)
     print(f"{kernel_name} median execution time: {median_time} ms, avg execution time: {avg_time} ms, std execution time: {std_time} ms")
     print(f"{kernel_name} median throughput (FLOPS): {median_throughput}, avg throughput: {avg_throughput}, std throughput: {std_throughput}")
-    print(f"{kernel_name} median bandwidth (B/s): {median_bandwidth}, avg bandwidth: {avg_bandwidth}, std bandwidth: {std_bandwidth}")
     perf.runtime_pd.loc[graphInfo.name, kernel_name] = median_time
     perf.throughput_pd.loc[graphInfo.name, kernel_name] = median_throughput
-    perf.bandwidth_pd.loc[graphInfo.name, kernel_name] = median_bandwidth
     return output
   return wrapper
 
@@ -379,9 +345,9 @@ def flashSparse_stable_softmax(Q, K, V, inputInfo):
   return total_time, h_prime
   
 def route_flashSparse(args, inputInfo, perf):
-  Q = torch.rand(inputInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
-  K = torch.rand(inputInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
-  V = torch.rand(inputInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
+  Q = torch.rand(inputInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)/10
+  K = torch.rand(inputInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)/10
+  V = torch.rand(inputInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)/10
   if args.use_cuda_event:
     no_softmax = timing_decorator(flashSparse_no_softmax, "flashSparse_no_softmax", inputInfo, perf)
     naive_softmax = timing_decorator(flashSparse_naive_softmax, "flashSparse_naive_softmax", inputInfo, perf)
@@ -462,7 +428,7 @@ def route_f3s(args, graphInfo, perf):
     RowWindowOffset, sortedRowWindows, TCblockRowid,\
     TCblocktileId, TCblockoffset, SparseAToXindex,\
     TBBoundaries, TCblockBitMap, block_count = f3s_preprocess_dataset(args, graphInfo, BLK_W=8)
-    graphInfo.f3s_flop_and_lgd(RowWindowOffset, args.embedding_dim, use_1tb1tcb=True)
+    graphInfo.f3s_flop(RowWindowOffset, args.embedding_dim, use_1tb1tcb=True)
     apply_softmax = True
     save_sddmm_result = False
     f3s_1tb1tcb(
@@ -472,7 +438,7 @@ def route_f3s(args, graphInfo, perf):
   RowWindowOffset, sortedRowWindows, TCblockRowid,\
   TCblocktileId, TCblockoffset, SparseAToXindex,\
   TBBoundaries, TCblockBitMap, block_count = f3s_preprocess_dataset(args, graphInfo, BLK_W=16)
-  graphInfo.f3s_flop_and_lgd(RowWindowOffset, args.embedding_dim, use_1tb1tcb=False)
+  graphInfo.f3s_flop(RowWindowOffset, args.embedding_dim, use_1tb1tcb=False)
   if args.alg == 'f3s_1tb1rw' or args.alg == 'all':
     print("f3s_1tb1rw")
     apply_softmax = True
@@ -519,7 +485,7 @@ def f3s_preprocess_dataset(args, graphInfo, BLK_W):
 def route_dfgnn(args, graphInfo, perf):
   from DFGNN.operators.fused_gtconv import GTConvFuse_inference_tiling, GTConvFuse_inference_hyper
   if args.use_cuda_event:
-    graphInfo.dfgnn_flop_and_lgd(args.embedding_dim)
+    graphInfo.dfgnn_flop(args.embedding_dim)
     dfgnn_tiling = event_timing_decorator(GTConvFuse_inference_tiling, "dfgnn_tiling", graphInfo, perf)
     dfgnn_hyper = event_timing_decorator(GTConvFuse_inference_hyper, "dfgnn_hyper", graphInfo, perf)
   else:
@@ -728,7 +694,7 @@ def route_methods(args, graphInfo, perf):
   if args.method == "flashSparse" or args.method == "all":
     # num_features and num_classes are for creating inputInfo.x and .y, which are not used in the kernel
     inputInfo = flashSparse_preprocess_dataset(args, graphInfo)
-    inputInfo.flashSparse_flop_and_lgd(inputInfo.row_pointers, args.embedding_dim)
+    inputInfo.flashSparse_flop(inputInfo.row_pointers, args.embedding_dim)
     torch.cuda.empty_cache()
     check_gpu_memory()
     route_flashSparse(args, inputInfo, perf)
@@ -746,10 +712,17 @@ def route_methods(args, graphInfo, perf):
     check_gpu_memory()
     pyg_gtconv(args, graphInfo, perf)
 
-def load_dataset(dataset_name):
+def load_dataset(dataset_name, args):
+  if dataset_name in ["ZINC"]:
+    return load_dataset_batchDGL(dataset_name, args)
+  elif dataset_name in ["COCO-SP", "Peptides-func", "PascalVOC-SP", "Peptides-struct"]:
+    return load_dataset_batchPyG(dataset_name, args)
+  else:
+    return load_dataset_npz(dataset_name)
+
+def load_dataset_npz(dataset_name):
   print(f"===========loading dataset: {dataset_name}===========")
-  # Check available GPU memory before loading dataset
-  path = f"/share/crsp/lab/amowli/share/Fused3S/dataset/{dataset_name}.npz"
+  path = f"{data_path}/{dataset_name}.npz"
   dataset = np.load(path)
   src_li = dataset['src_li'] # this can contain duplicate edges
   dst_li = dataset['dst_li']
@@ -761,6 +734,38 @@ def load_dataset(dataset_name):
   graphInfo = GraphInfo(dataset_name, adj)
   return graphInfo
 
+def load_dataset_batchDGL(dataset_name, args):
+  import dgl
+  print(f"===========loading dataset: {dataset_name}===========")
+  if dataset_name == "ZINC":
+    from dgl.data import ZINCDataset
+    dataset = ZINCDataset(mode='train', raw_dir=f"{temp_data_path}/ZINC")
+    batched_g = dgl.batch([dataset[i][0] for i in range(args.batch_size)])
+    print(f"batched_g: {batched_g}")
+    #get csr adjacency matrix of batched_g
+    adj = batched_g.adj()
+    #create scipy csr matrix 
+    indptr = adj.csr()[0]
+    indices = adj.csr()[1]
+    data = adj.csr()[2]
+    sp_csr = csr_matrix((data, indices, indptr), shape=adj.shape)
+    graphInfo = GraphInfo(dataset_name, sp_csr)
+    return graphInfo
+
+def load_dataset_batchPyG(dataset_name, args):
+  from torch_geometric.data import Batch
+  from torch_geometric.utils import to_scipy_sparse_matrix
+  from torch_geometric.datasets import LRGBDataset
+  print(f"===========loading dataset: {dataset_name}===========")
+  path = f"{temp_data_path}/{dataset_name}"
+  dataset = LRGBDataset(root=path, name=dataset_name)
+  batched_g = Batch.from_data_list([dataset[i] for i in range(args.batch_size)])
+  adj = to_scipy_sparse_matrix(batched_g.edge_index, num_nodes=batched_g.num_nodes)
+  adj = adj.tocsr()
+  print(f"adj nnz: {adj.nnz}, num_nodes: {adj.shape}")
+  graphInfo = GraphInfo(dataset_name, adj)
+  return graphInfo
+  
 def main(args):
   num_heads = 1
   args.dev = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -774,12 +779,11 @@ def main(args):
     test_algs = [args.alg]
   perf = Perf(test_algs, test_dataset)
   for dataset in test_dataset:
-    graphInfo = load_dataset(dataset)
+    graphInfo = load_dataset(dataset, args)
     check_gpu_memory()
     route_methods(args, graphInfo, perf)
   perf.runtime_pd.to_csv(f"baseline_comp_kernel_only_runtime_{args.method}_{args.alg}_{args.dataset}_{get_gpu_model()}.csv")
   perf.throughput_pd.to_csv(f"baseline_comp_kernel_only_throughput_{args.method}_{args.alg}_{args.dataset}_{get_gpu_model()}.csv")
-  perf.bandwidth_pd.to_csv(f"baseline_comp_kernel_only_bandwidth_{args.method}_{args.alg}_{args.dataset}_{get_gpu_model()}.csv")
   
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -787,11 +791,13 @@ if __name__ == "__main__":
                        help='Dimension of node embeddings')
     parser.add_argument('--n_warp_per_block', '-nw', type=int, default=8,
                        help='Number of warps per block')
+    parser.add_argument('--batch_size', '-bs', type=int, default=1024,
+                       help='Batch size, only valid for batch graph')
     parser.add_argument('--dataset', '-d', type=str, default="reddit",
                        choices=datasets + ["all"])
     parser.add_argument('--method', '-m', type=str, default="f3s",
                        choices=["f3s", "flashSparse", "df-gnn", "pyg", "all"])
-    parser.add_argument("--alg", '-a', type=str, default='f3s_1tb1rw_scheduled', 
+    parser.add_argument("--alg", '-a', type=str, default='f3s_1tb1rw_scheduled_permuteV', 
                         choices= algs + ['all'])
     parser.add_argument("--use_cuda_event", action='store_true', 
                         help='Use CUDA event to measure time, runs multiple iterations to get average time')
