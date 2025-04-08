@@ -6,14 +6,10 @@ from scipy import stats
 datasets = ["citeseer", "cora", "pubmed", "Ell", "github", 
             "Artist", "com-amazon.ungraph", "Blog", 
             "amazon0505", "igb_small", "yelp", "reddit", 
-            "igb_medium", "ogbn-products", "amazonProducts"]
+            "igb_medium", "ogbn-products", "amazonProducts", 
+            "ZINC", "PascalVOC-SP", "COCO-SP", "Peptides-func", 
+            "Peptides-struct"]
 
-# Original names for data reading
-# algs_original = ['f3s_1tb1tcb', 'f3s_1tb1rw', 
-#         'f3s_1tb1rw_scheduled', 'f3s_1tb1rw_scheduled_permuteV',
-#         'flashSparse_naive_softmax', 'flashSparse_stable_softmax', 
-#         'GTConvFuse_inference_tiling', 'GTConvFuse_inference_hyper', 
-#         'propagate']
 algs_original = ['f3s_1tb1tcb', 'f3s_1tb1rw', 
         'f3s_1tb1rw_scheduled', 'f3s_1tb1rw_scheduled_permuteV',
         'flashSparse_naive_softmax', 'flashSparse_stable_softmax', 
@@ -40,7 +36,7 @@ baseline_data = []
 
 gpu_name = "A30"
 
-results_path = "kernel_only_comp_results_2"
+results_path = "kernel_only_comp_results_3"
 # Read the consolidated CSV file
 file_name = f"{results_path}/baseline_comp_kernel_only_runtime_all_all_all_{gpu_name}.csv"
 try:

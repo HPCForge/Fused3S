@@ -46,7 +46,7 @@ python baseline_comp_kernel_only.py -d reddit -m f3s -a f3s_1tb1rw_scheduled --c
 
 ## To profile individual kernel with ncu
 ```shell
-ncu --set full -f --import-source yes --source-folders F3S/src --export f3s_pubmed.ncu-rep --kernel-name "regex:f3sKernel1tb1rwScheduledPermutedQKVScaleQK" python f3s_kernel_only.py -d pubmed -m f3s -a f3s_1tb1rw_scheduled_permuteV
+ncu --set full -f --import-source yes --source-folders F3S/src --export f3s_pubmed.ncu-rep --kernel-name "regex:f3sKernel1tb1rwScheduledPermutedQKVScaleQK" python baseline_comp_kernel_only.py -d pubmed -m f3s -a f3s_1tb1rw_scheduled_permuteV
 ```
 
 ## Reproduce results in Figure 7
