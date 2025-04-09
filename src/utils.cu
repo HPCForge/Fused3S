@@ -69,9 +69,10 @@ void generate_tcblock_rowid_cuda(int *rowwindow_offset, int *tcblock_rowid,
   int window_count = num_row_windows;
   generate_tcblock_rowid<<<window_count, block_size>>>(
       rowwindow_offset, tcblock_rowid, num_row_windows);
-  cudaError_t error = cudaGetLastError();
+  cudaDeviceSynchronize();
+  cudaError_t error = cudaGetLastError(); 
   if (error != cudaSuccess) {
-    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    printf("CUDA error in generate_tcblock_rowid_cuda: %s\n", cudaGetErrorString(error));
     exit(-1);
   }
 }
@@ -160,12 +161,10 @@ void generate_edgetocolumn_cuda(int *nodePointer, int *edgelist,
   generate_edgetocolumn<<<window_count, block_size>>>(
       nodePointer, edgelist, edgelist_sort, edgetocol, blockpartition, blocknum,
       blockSize_h, blockSize_w, num_nodes);
-  // generate_edgetocolumn_v1<<< window_count, block_size >>> (nodePointer,
-  // edgelist, edgelist_sort, edgetocol, blockpartition, blocknum, blockSize_h,
-  // blockSize_w, num_nodes);
+  cudaDeviceSynchronize();
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
-    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    printf("CUDA error in generate_edgetocolumn_cuda: %s\n", cudaGetErrorString(error));
     exit(-1);
   }
 }
@@ -235,8 +234,15 @@ void generate_tcoffset_id_atob_cuda(int *nodePointer, int *rowwindow_offset,
   int window_count = num_row_windows;
   const int dynamic_shared_size = (2 * max_block + 1) * sizeof(int);
   std::cout << "dynamic_shared_size: " << dynamic_shared_size << std::endl;
-  if (dynamic_shared_size > 98304) {
-    int maxbytes = 131072; // 96 KB
+  if (dynamic_shared_size > 204800) {
+    printf("dynamic_shared_size: %d is greater than 204800\n", dynamic_shared_size);
+    exit(-1);
+  } else if (dynamic_shared_size > 131072) {
+    int maxbytes = 204800; // 200 KB
+    cudaFuncSetAttribute(generate_tcoffset_id_atob,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes);
+  } else if (dynamic_shared_size > 98304) {
+    int maxbytes = 131072; // 128 KB
     cudaFuncSetAttribute(generate_tcoffset_id_atob,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes);
   } else if (dynamic_shared_size > 65536) {
@@ -244,7 +250,7 @@ void generate_tcoffset_id_atob_cuda(int *nodePointer, int *rowwindow_offset,
     cudaFuncSetAttribute(generate_tcoffset_id_atob,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes);
   } else if (dynamic_shared_size > 32768) {
-    int maxbytes = 65536; // 128 KB
+    int maxbytes = 65536; // 64 KB
     cudaFuncSetAttribute(generate_tcoffset_id_atob,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes);
   }
@@ -252,9 +258,10 @@ void generate_tcoffset_id_atob_cuda(int *nodePointer, int *rowwindow_offset,
       nodePointer, rowwindow_offset, edgeToColumn, edgeToRow, edgeList,
       tcblock_offset, tcblock_tileid, sparseatob, tcblock_bit_map, max_block, num_nodes,
       blockSize_h, blockSize_w, num_row_windows);
+  cudaDeviceSynchronize();
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
-    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    printf("CUDA error in generate_tcoffset_id_atob_cuda: %s\n", cudaGetErrorString(error));
     exit(-1);
   }
 }
@@ -335,28 +342,27 @@ seg_sort_dequ(int *seg, int *edgeLists, int *nodepointer, int *edgetocol,
 
 __global__ void fill_edgeToRow(int *edgeToRow, int *nodePointer,
                                int num_nodes) {
-  int tid = blockDim.x * blockIdx.x + threadIdx.x;
-  int nid = tid / 32;
-  int laneid = tid % 32;
-  // check a valid node range.
-  if (nid < num_nodes) {
-#pragma unroll
-    for (int eid = nodePointer[nid] + laneid; eid < nodePointer[nid + 1];
-         eid += 32) {
+  int wid = threadIdx.y;
+  int bid = blockIdx.x;
+  for(int nid = bid*blockDim.y + wid; nid < num_nodes; nid += blockDim.y*gridDim.x) {
+    for (int eid = nodePointer[nid] + threadIdx.x; eid < nodePointer[nid + 1]; eid += 32) {
       edgeToRow[eid] = nid;
     }
   }
 }
 
-void fill_edgeToRow_cuda(int *edgeToRow, int *nodePointer, int num_nodes) {
-  int wrap_size = 32;
-  int block_size = 1024;
-  int grid_size = (num_nodes * wrap_size + block_size - 1) / block_size;
-  fill_edgeToRow<<<grid_size, block_size>>>(edgeToRow, nodePointer, num_nodes);
+void fill_edgeToRow_cuda(int *edgeToRow, int *nodePointer, int numNodes) {
+  int warpSize = 32;
+  int nWarpPerBlock = 32;
+  dim3 blockSize(warpSize, nWarpPerBlock);
+  long long gridSize = (static_cast<long long>(numNodes) + nWarpPerBlock - 1) / nWarpPerBlock;
+  int gridSize_int = std::min(gridSize, static_cast<long long>(10000));
+  fill_edgeToRow<<<gridSize_int, blockSize>>>(edgeToRow, nodePointer, numNodes);
+  cudaDeviceSynchronize();
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
     // print the CUDA error message and exit
-    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    printf("CUDA error in fill_edgeToRow_cuda: %s\n", cudaGetErrorString(error));
     exit(-1);
   }
 }
@@ -381,9 +387,10 @@ void fill_segment_cuda(int *nodePointer, int *seg_out, int blockSize_h,
   int window_count = (num_nodes + blockSize_h - 1) / blockSize_h;
   fill_segment<<<window_count, block_size>>>(nodePointer, seg_out, blockSize_h,
                                              blockSize_w, num_nodes);
+  cudaDeviceSynchronize();
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
-    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    printf("CUDA error in fill_segment_cuda: %s\n", cudaGetErrorString(error));
     exit(-1);
   }
 }

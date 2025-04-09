@@ -38,8 +38,8 @@ algs = ['f3s_1tb1tcb', 'f3s_1tb1rw', 'f3s_1tb1rw_no_softmax',
         'flashSparse_no_softmax', 'flashSparse_naive_softmax', 'flashSparse_stable_softmax', 
         'dfgnn_tiling', 'dfgnn_hyper', 'pyg_gtconv']
 
-data_path = "/share/crsp/lab/amowli/share/Fused3S/dataset"
-temp_data_path = "/share/crsp/lab/amowli/share/Fused3S/dataLoader"
+data_path = "/workspace/washington/F3s-dataset"
+temp_data_path = "/workspace/washington/F3s-tempData"
 
 def check_gpu_memory():
   if torch.cuda.is_available():
@@ -78,11 +78,15 @@ class Perf:
 
 class GraphInfo:
   # adj is a scipy.sparse.csr_matrix
-  def __init__(self, name, adj):
+  def __init__(self, name, adj, embedding_dim):
     self.name = name
     self.adj = adj
     self.num_nodes = adj.shape[0]
     self.num_edges = adj.nnz
+    # Initialize Q, K, V on the host side as fp32
+    self.Q_host = torch.rand(self.num_nodes, embedding_dim, dtype=torch.float32)
+    self.K_host = torch.rand(self.num_nodes, embedding_dim, dtype=torch.float32)
+    self.V_host = torch.rand(self.num_nodes, embedding_dim, dtype=torch.float32)
 
   def get_row_pointers(self):
     return torch.IntTensor(self.adj.indptr).cuda()
@@ -344,10 +348,9 @@ def flashSparse_stable_softmax(Q, K, V, inputInfo):
   print(f"stable_softmax: sddmm: {sddmm_time} ms, softmax: {softmax_time} ms, spmm: {spmm_time} ms, total: {total_time} ms")
   return total_time, h_prime
   
-def route_flashSparse(args, inputInfo, perf):
-  Q = torch.rand(inputInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)/10
-  K = torch.rand(inputInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)/10
-  V = torch.rand(inputInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)/10
+def route_flashSparse(args, graphInfo, perf):
+  inputInfo = flashSparse_preprocess_dataset(args, graphInfo)
+  inputInfo.flashSparse_flop(inputInfo.row_pointers, args.embedding_dim)
   if args.use_cuda_event:
     no_softmax = timing_decorator(flashSparse_no_softmax, "flashSparse_no_softmax", inputInfo, perf)
     naive_softmax = timing_decorator(flashSparse_naive_softmax, "flashSparse_naive_softmax", inputInfo, perf)
@@ -358,6 +361,9 @@ def route_flashSparse(args, inputInfo, perf):
     naive_softmax = flashSparse_naive_softmax
     stable_softmax = flashSparse_stable_softmax
 
+  Q = graphInfo.Q_host.half().cuda()
+  K = graphInfo.K_host.half().cuda()
+  V = graphInfo.V_host.half().cuda()
   if args.alg == "flashSparse_no_softmax":
     try:
       no_softmax(Q, K, V, inputInfo)
@@ -379,13 +385,11 @@ def flashSparse_preprocess_dataset(args, graphInfo):
   window = 8
   wide = 16
   inputInfo = InputInfo()
-  inputInfo.name = graphInfo.name
   inputInfo.orig_row_pointers = graphInfo.get_row_pointers()
-  inputInfo.column_index = graphInfo.get_column_index()
   inputInfo.row_pointers, inputInfo.column_index, \
   inputInfo.degrees, inputInfo.t_window_rowTensor, \
   inputInfo.t_atomicTensor = FS_Block.blockProcess_sddmm_balance_gnn(inputInfo.orig_row_pointers.cpu(),
-                                                                     inputInfo.column_index.cpu(), 
+                                                                     graphInfo.get_column_index().cpu(), 
                                                                      window, wide, partSize)
   inputInfo.row_pointers = inputInfo.row_pointers.cuda()
   inputInfo.column_index = inputInfo.column_index.cuda()
@@ -403,15 +407,11 @@ def flashSparse_preprocess_dataset(args, graphInfo):
   if max_vectors%wide > 0 :
       max_vectors += (wide - (max_vectors%wide))
   inputInfo.max = max_vectors / wide
-  
   if inputInfo.max % 4 > 0 :
       inputInfo.max += 4 - inputInfo.max%4
   return inputInfo
 
 def route_f3s(args, graphInfo, perf):
-  Q = torch.rand(graphInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
-  K = torch.rand(graphInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
-  V = torch.rand(graphInfo.num_nodes, args.embedding_dim, dtype=torch.float16, device=args.dev)
   import F3S
   if args.use_cuda_event:
     f3s_1tb1rw = timing_decorator(F3S.f3s_1tb1rw, "f3s_1tb1rw", graphInfo, perf)
@@ -424,48 +424,64 @@ def route_f3s(args, graphInfo, perf):
     f3s_1tb1rw_scheduled_permuteV = F3S.f3s_1tb1rw_scheduled_permuteV
     f3s_1tb1tcb = F3S.f3s_1tb1tcb
 
-  if args.alg == 'f3s_1tb1tcb' or args.alg == 'all':
-    RowWindowOffset, sortedRowWindows, TCblockRowid,\
-    TCblocktileId, TCblockoffset, SparseAToXindex,\
-    TBBoundaries, TCblockBitMap, block_count = f3s_preprocess_dataset(args, graphInfo, BLK_W=8)
+  run_1tb1tcb = args.alg == 'f3s_1tb1tcb' or args.alg == 'all'
+  run_1tb1rw_variants = args.alg in ['f3s_1tb1rw', 'f3s_1tb1rw_scheduled',
+                                     'f3s_1tb1rw_scheduled_permuteV', 'all']
+
+  if run_1tb1tcb:
+    RowWindowOffset, _, _, _, _,\
+    SparseAToXindex, _, TCblockBitMap, _ = f3s_preprocess_dataset(args, graphInfo, BLK_W=8)
     graphInfo.f3s_flop(RowWindowOffset, args.embedding_dim, use_1tb1tcb=True)
     apply_softmax = True
     save_sddmm_result = False
-    f3s_1tb1tcb(
-      RowWindowOffset, SparseAToXindex, TCblockBitMap, 
-      graphInfo.num_nodes, Q, K, V, apply_softmax, save_sddmm_result)
-    
-  RowWindowOffset, sortedRowWindows, TCblockRowid,\
-  TCblocktileId, TCblockoffset, SparseAToXindex,\
-  TBBoundaries, TCblockBitMap, block_count = f3s_preprocess_dataset(args, graphInfo, BLK_W=16)
-  graphInfo.f3s_flop(RowWindowOffset, args.embedding_dim, use_1tb1tcb=False)
-  if args.alg == 'f3s_1tb1rw' or args.alg == 'all':
-    print("f3s_1tb1rw")
-    apply_softmax = True
     try:
-      f3s_1tb1rw(
+      check_gpu_memory()
+      Q = graphInfo.Q_host.half().cuda()
+      K = graphInfo.K_host.half().cuda()
+      V = graphInfo.V_host.half().cuda()
+      f3s_1tb1tcb(
         RowWindowOffset, SparseAToXindex, TCblockBitMap, 
-        graphInfo.num_nodes, Q, K, V, args.n_warp_per_block, apply_softmax,
-        args.check_sm_active_time)
+        graphInfo.num_nodes, Q, K, V, apply_softmax, save_sddmm_result)
     except Exception as e:
-      print(f"Error in f3s_1tb1rw: {e}")
-  if args.alg == 'f3s_1tb1rw_scheduled' or args.alg == 'all':
-    print("f3s_1tb1rw_scheduled")
-    try:
-      f3s_1tb1rw_scheduled(
-        RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
-        graphInfo.num_nodes, Q, K, V, args.n_warp_per_block, 
-        args.check_sm_active_time)
-    except Exception as e:
-      print(f"Error in f3s_1tb1rw_scheduled: {e}")
-  if args.alg == 'f3s_1tb1rw_scheduled_permuteV' or args.alg == 'all':
-    print("f3s_1tb1rw_scheduled_permuteV")
-    try:
-      f3s_1tb1rw_scheduled_permuteV(
-        RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
-        graphInfo.num_nodes, Q, K, V, args.n_warp_per_block)
-    except Exception as e:
-      print(f"Error in f3s_1tb1rw_scheduled_permuteV: {e}")
+      print(f"Error in f3s_1tb1tcb: {e}")
+  
+  #torch.cuda.empty_cache()
+  #check_gpu_memory()
+
+  if run_1tb1rw_variants:
+    RowWindowOffset, sortedRowWindows, _, _, _ ,\
+    SparseAToXindex, _, TCblockBitMap, _ = f3s_preprocess_dataset(args, graphInfo, BLK_W=16)
+    graphInfo.f3s_flop(RowWindowOffset, args.embedding_dim, use_1tb1tcb=False)
+    Q = graphInfo.Q_host.half().cuda()
+    K = graphInfo.K_host.half().cuda()
+    V = graphInfo.V_host.half().cuda()
+    if args.alg == 'f3s_1tb1rw' or args.alg == 'all':
+      print("f3s_1tb1rw")
+      apply_softmax = True
+      try:
+        f3s_1tb1rw(
+          RowWindowOffset, SparseAToXindex, TCblockBitMap, 
+          graphInfo.num_nodes, Q, K, V, args.n_warp_per_block, apply_softmax,
+          args.check_sm_active_time)
+      except Exception as e:
+        print(f"Error in f3s_1tb1rw: {e}")
+    if args.alg == 'f3s_1tb1rw_scheduled' or args.alg == 'all':
+      print("f3s_1tb1rw_scheduled")
+      try:
+        f3s_1tb1rw_scheduled(
+          RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
+          graphInfo.num_nodes, Q, K, V, args.n_warp_per_block, 
+          args.check_sm_active_time)
+      except Exception as e:
+        print(f"Error in f3s_1tb1rw_scheduled: {e}")
+    if args.alg == 'f3s_1tb1rw_scheduled_permuteV' or args.alg == 'all':
+      print("f3s_1tb1rw_scheduled_permuteV")
+      try:
+        f3s_1tb1rw_scheduled_permuteV(
+          RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
+          graphInfo.num_nodes, Q, K, V, args.n_warp_per_block)
+      except Exception as e:
+        print(f"Error in f3s_1tb1rw_scheduled_permuteV: {e}")
 
 def f3s_preprocess_dataset(args, graphInfo, BLK_W):
   from F3S import preprocess_gpu
@@ -523,10 +539,6 @@ def dfgnn_preprocess_dataset(args, num_edges, max_row_nnz, alg):
     smem_consume = (max_neigh + WARP_SIZE - 1) // WARP_SIZE * WARP_SIZE
     return smem_consume, val
   elif alg == "dfgnn_hyper":
-    # smem_consume = (max_neigh * 8 + WARP_SIZE - 1) // WARP_SIZE * WARP_SIZE
-
-    # each warp takes 1 row. 8 warps per block.
-    # smem_consume = graphInfo.get_max_nnz_per_row() * 8
     smem_consume = max_row_nnz * 8
     return smem_consume, val
   else:
@@ -681,11 +693,11 @@ def pyg_gtconv(args, graphInfo, perf):
   pyg_layer = PygTransformerConv(args.embedding_dim, args.embedding_dim, heads=1, bias=False, root_weight=False)
   propagate = event_timing_decorator(pyg_layer.propagate, "pyg_gtconv", graphInfo, perf)
   num_nodes = graphInfo.num_nodes
-  Q = torch.rand(num_nodes, 1, args.embedding_dim, dtype=torch.float32, device=args.dev)
-  K = torch.rand(num_nodes, 1, args.embedding_dim, dtype=torch.float32, device=args.dev)
-  V = torch.rand(num_nodes, 1, args.embedding_dim, dtype=torch.float32, device=args.dev)
   edge_index = graphInfo.get_edge_index().contiguous()
   try:
+    Q = graphInfo.Q_host.unsqueeze(1).cuda()
+    K = graphInfo.K_host.unsqueeze(1).cuda()
+    V = graphInfo.V_host.unsqueeze(1).cuda()
     out = propagate(edge_index=edge_index, query=Q, key=K, value=V, edge_attr=None)
   except Exception as e:
     print(f"Error in pyg_gtconv: {e}")
@@ -693,12 +705,9 @@ def pyg_gtconv(args, graphInfo, perf):
 def route_methods(args, graphInfo, perf):
   if args.method == "flashSparse" or args.method == "all":
     # num_features and num_classes are for creating inputInfo.x and .y, which are not used in the kernel
-    inputInfo = flashSparse_preprocess_dataset(args, graphInfo)
-    inputInfo.flashSparse_flop(inputInfo.row_pointers, args.embedding_dim)
     torch.cuda.empty_cache()
     check_gpu_memory()
-    route_flashSparse(args, inputInfo, perf)
-    del inputInfo
+    route_flashSparse(args, graphInfo, perf)
   if args.method == "f3s" or args.method == "all":
     torch.cuda.empty_cache()
     check_gpu_memory()
@@ -718,9 +727,9 @@ def load_dataset(dataset_name, args):
   elif dataset_name in ["COCO-SP", "Peptides-func", "PascalVOC-SP", "Peptides-struct"]:
     return load_dataset_batchPyG(dataset_name, args)
   else:
-    return load_dataset_npz(dataset_name)
+    return load_dataset_npz(dataset_name, args)
 
-def load_dataset_npz(dataset_name):
+def load_dataset_npz(dataset_name, args):
   print(f"===========loading dataset: {dataset_name}===========")
   path = f"{data_path}/{dataset_name}.npz"
   dataset = np.load(path)
@@ -731,7 +740,7 @@ def load_dataset_npz(dataset_name):
   scipy_coo = coo_matrix((val, edge_index), shape=(dataset['num_nodes'], dataset['num_nodes']))
   adj = scipy_coo.tocsr()
   print(f"dataset: {dataset_name}, num_nodes: {adj.shape[0]}, num_edges: {adj.nnz}")
-  graphInfo = GraphInfo(dataset_name, adj)
+  graphInfo = GraphInfo(dataset_name, adj, args.embedding_dim)
   return graphInfo
 
 def load_dataset_batchDGL(dataset_name, args):
@@ -749,7 +758,7 @@ def load_dataset_batchDGL(dataset_name, args):
     indices = adj.csr()[1]
     data = adj.csr()[2]
     sp_csr = csr_matrix((data, indices, indptr), shape=adj.shape)
-    graphInfo = GraphInfo(dataset_name, sp_csr)
+    graphInfo = GraphInfo(dataset_name, sp_csr, args.embedding_dim)
     return graphInfo
 
 def load_dataset_batchPyG(dataset_name, args):
@@ -763,7 +772,7 @@ def load_dataset_batchPyG(dataset_name, args):
   adj = to_scipy_sparse_matrix(batched_g.edge_index, num_nodes=batched_g.num_nodes)
   adj = adj.tocsr()
   print(f"adj nnz: {adj.nnz}, num_nodes: {adj.shape}")
-  graphInfo = GraphInfo(dataset_name, adj)
+  graphInfo = GraphInfo(dataset_name, adj, args.embedding_dim)
   return graphInfo
   
 def main(args):
@@ -805,3 +814,4 @@ if __name__ == "__main__":
                         help='Check SM active time, only valid for f3s_1tb1rw_scheduled and f3s_1tb1rw')
     args = parser.parse_args()
     main(args)
+

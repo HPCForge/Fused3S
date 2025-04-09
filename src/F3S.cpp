@@ -85,8 +85,7 @@ preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
   auto sparse_AToX_index_tensor = std::get<3>(tuple_tensor_blockcnt);
   auto tcblock_bit_map_tensor = std::get<4>(tuple_tensor_blockcnt);
   block_counter = std::get<5>(tuple_tensor_blockcnt);
-  printf("TC_Blocks:\t%d\nExp_Edges:\t%d\n", block_counter,
-         block_counter * 8 * 16);
+  printf("TC_Blocks:\t%d\n", block_counter);
   return std::make_tuple(row_window_offset_tensor, sorted_row_window_tensor, 
                          tcblock_rowid_tensor, tcblocktile_id_tensor, 
                          tcblock_offset_tensor, sparse_AToX_index_tensor, 
@@ -356,3 +355,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("f3s_1tb1rw_scheduled_permuteV_scaleQK", &f3s1tb1rwScheduledPermuteVScaleQK, "fused3S 1tb1rw scheduled permuteV scaleQK");
   m.def("sddmm_1tbnrw", &sddmm1tbnrw, "sddmm 1tbnrw");
 }
+

@@ -204,20 +204,22 @@ __device__ void setQFragPermute(volatile uint32_t* Q_frag, uint64_t* Q, int bid,
 }
 
 __device__ void setQFrag(volatile uint32_t* Q_frag, uint32_t* Q, int bid, int warpId, int laneId, int numNodes, int embeddingDim){
-   // Threads of a warp for fetching a 16X16 block of Q.
+  // Threads of a warp for fetching a 16X16 block of Q.
   // DOC: https://docs.nvidia.com/cuda/parallel-thread-execution/index.html?highlight=wmma#matrix-fragments-for-mma-m16n8k16-with-floating-point-type
   // Here I'm swapping columns of Q to make the memory access more coalesced. 
   // So when loading K, we have to swap the rows accordingly in order to get the same result.
-  int rowIdx = bid * BLK_M + laneId/4;
+  int64_t rowIdx = bid * BLK_M + laneId/4;
   // /4 because half4.
   int colIdx = warpId * BLK_K/2 + (laneId%4);
   if(rowIdx < numNodes){
-    Q_frag[0] = Q[rowIdx * embeddingDim/2 + colIdx];
-    Q_frag[2] = Q[rowIdx * embeddingDim/2 + colIdx + BLK_K/4];
+    int64_t qIdx = rowIdx * embeddingDim/2 + colIdx;
+    Q_frag[0] = Q[qIdx];
+    Q_frag[2] = Q[qIdx + BLK_K/4];
   }
   if(rowIdx + 8 < numNodes){
-    Q_frag[1] = Q[(rowIdx+8) * embeddingDim/2 + colIdx];
-    Q_frag[3] = Q[(rowIdx+8) * embeddingDim/2 + colIdx + BLK_K/4];
+    int64_t qIdx = (rowIdx+8) * embeddingDim/2 + colIdx;
+    Q_frag[1] = Q[qIdx];
+    Q_frag[3] = Q[qIdx + BLK_K/4];
   }
 }
 
@@ -368,7 +370,6 @@ f3sCuda1tb1tcb(
   auto output = torch::zeros({paddedLength, embeddingDim}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
   dim3 grid(nRowWindow, 1, 1);
   dim3 block(WARP_SIZE, nWarpPerBlock, 1);
-  //prevent overflow
   torch::Tensor sddmmResult;
   if(saveSddmmResult){
     uint64_t nTcb = sparseAToXidx.size(0)/BLK_N;
@@ -411,7 +412,7 @@ f3sCuda1tb1tcb(
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
     // print the CUDA error message and exit
-    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    printf("CUDA error in f3sCuda1tb1tcb: %s\n", cudaGetErrorString(error));
     exit(-1);
   }
   cudaDeviceSynchronize();
@@ -789,9 +790,10 @@ __global__ void f3sKernel1tb1tcb(
       for(int i = 0; i < 2; i++){
         if(!lastBlock || i == 0){
           // Initialize B_frag from K
-          int rowIdx = sparseAToXidx[(tcbId+i) * BLK_N + laneId / 4]; 
-          B_frag[0] = K_uint32[rowIdx * embeddingDim/2 + colIdx];
-          B_frag[1] = K_uint32[rowIdx * embeddingDim/2 + colIdx + BLK_M/4];
+          int64_t rowIdx = sparseAToXidx[(tcbId+i) * BLK_N + laneId / 4]; 
+          int64_t kIdx = rowIdx * embeddingDim/2 + colIdx;
+	  B_frag[0] = K_uint32[kIdx];
+          B_frag[1] = K_uint32[kIdx + BLK_M/4];
           HMMA16816(D_frag[0], D_frag[1], D_frag[2], D_frag[3], 
                     Q_frag[0], Q_frag[1], Q_frag[2], Q_frag[3], 
                     B_frag[0], B_frag[1], 
@@ -903,8 +905,9 @@ __global__ void f3sKernel1tb1tcb(
           for(int i = 0; i < 2; i++){// 2 8x8 blocks in each 16x8 block
             if(!lastBlock || i == 0){
               for(int k = 0; k < 2; k++){// 2 halfs in each 8x8 block
-                int rowIdx = sparseAToXidx[(tcbId+i) * BLK_N + (laneId%4)*2 + k];
-                temp_V[k] = V[rowIdx * embeddingDim + colIdx];
+                int64_t rowIdx = sparseAToXidx[(tcbId+i) * BLK_N + (laneId%4)*2 + k];
+                int64_t vIdx = rowIdx * embeddingDim + colIdx;
+		temp_V[k] = V[vIdx];
               }
               h2U32Converter.h2 = __halves2half2(temp_V[0], temp_V[1]);
               B_frag[i] = h2U32Converter.u32;
@@ -934,11 +937,12 @@ __global__ void f3sKernel1tb1tcb(
     }
   }
   for(int j=0; j < 2; j++){// 2 8x8 blocks in each 16x8 block
-    int rowIdx = bid * BLK_M + (laneId / 4) + j * BLK_M/2;
+    int64_t rowIdx = bid * BLK_M + (laneId / 4) + j * BLK_M/2;
     for(int i =0; i < 2; i++){// 2 16x8 blocks
       int colIdx = (warpId * 2 + i) * BLK_N + (laneId % 4) * 2;
-      output[rowIdx * embeddingDim + colIdx] = O_frag[i*4 + j*2];
-      output[rowIdx * embeddingDim + colIdx + 1] = O_frag[i*4 + j*2 + 1]; 
+      int64_t outIdx = rowIdx * embeddingDim + colIdx;
+      output[outIdx] = O_frag[i*4 + j*2];
+      output[outIdx + 1] = O_frag[i*4 + j*2 + 1]; 
     }
   }
 }
