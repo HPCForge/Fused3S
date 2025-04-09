@@ -190,9 +190,8 @@ def main(args):
     edgeToRow_cuda  = edgeToRow.cuda()
     indices = torch.IntTensor(A_csr_h.indices).cuda()
     indptr = torch.IntTensor(A_csr_h.indptr).cuda()
-    RowWindowOffset, sortedRowWindows, TCblockRowid,\
-    TCblocktileId, TCblockoffset, SparseAToXindex,\
-    TBBoundaries, TCblockBitMap, block_count = F3S.preprocess_gpu(indices, indptr, size, 
+    RowWindowOffset, sortedRowWindows, TCblockRowid,_, _,\
+    SparseAToXindex, TBBoundaries, TCblockBitMap, _ = F3S.preprocess_gpu(indices, indptr, size, 
                                                                   BLK_H, BLK_W, 
                                                                   blockPartition_cuda, 
                                                                   edgeToColumn_cuda, 
@@ -224,9 +223,9 @@ def main(args):
       else:
         raise ValueError(f"Invalid algorithm: {args.alg}")
     print(f"f3s_time: {time.item()} ms")
-    # Print full SDDMM result without truncation
-    rel_err = torch.norm(sddmm_result - sddmm_true) / sddmm_true_norm
-    f3s_v_true_fp32_sddmm.append(rel_err.item())
+    if args.check_sddmm:
+      rel_err = torch.norm(sddmm_result - sddmm_true) / sddmm_true_norm
+      f3s_v_true_fp32_sddmm.append(rel_err.item())
 
     torch.set_printoptions(precision=2, threshold=float('inf'))
     if fusedR is not None:
@@ -247,14 +246,14 @@ def main(args):
       rel_err = torch.norm(fusedR - true) / true_norm
       f3s_v_true_fp32_final.append(rel_err.item())
 
-  half_v_float_sddmm_mean = np.mean(np.array(half_v_float_sddmm))
-  print(f"sddmm pytorch half vs single: {half_v_float_sddmm_mean}")
-
   half_v_float_final_mean = np.mean(np.array(half_v_float_final))
   print(f"final solution pytorch half vs float: {half_v_float_final_mean}")
 
-  f3s_v_true_fp32_sddmm = np.mean(np.array(f3s_v_true_fp32_sddmm))
-  print(f"f3s sddmm vs pytorch float: {f3s_v_true_fp32_sddmm}")
+  if args.check_sddmm:
+    half_v_float_sddmm_mean = np.mean(np.array(half_v_float_sddmm))
+    print(f"sddmm pytorch half vs single: {half_v_float_sddmm_mean}")
+    f3s_v_true_fp32_sddmm = np.mean(np.array(f3s_v_true_fp32_sddmm))
+    print(f"f3s sddmm vs pytorch float: {f3s_v_true_fp32_sddmm}")
 
   if fusedR is not None:
     f3s_v_true_fp32_final = np.mean(np.array(f3s_v_true_fp32_final))
@@ -267,6 +266,7 @@ if __name__ == "__main__":
   parser.add_argument("--size", '-s', type=int, default=1000)
   parser.add_argument("--density", '-d', type=float, default=0.1)
   parser.add_argument("--skip_softmax", action='store_true')
+  parser.add_argument("--check_sddmm", '-c', action='store_true')
   parser.add_argument("--alg", '-a', type=str, default='1tb1rw_scheduled_permuteV', 
                       choices=['1tb1tcb', '1tb1rw', '1tb1rw_scheduled', '1tb1rw_scheduled_permuteV'])
   args = parser.parse_args()

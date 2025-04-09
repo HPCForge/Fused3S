@@ -149,18 +149,6 @@ f3sCuda1tb1rwScheduled(
     bool permuteV,
     float scalingFactor);
 
-std::vector<torch::Tensor> 
-sddmmCuda1tbnrw(
-    torch::Tensor rowWindowOffset,
-    torch::Tensor tbBoundaries,
-    torch::Tensor tcbRowid,
-    torch::Tensor sparseAToXidx,
-    torch::Tensor tcbBitMap,
-    int nNodes,
-    int embeddingDim,
-    torch::Tensor Q, torch::Tensor K,
-    int nWarpPerBlock);
-
 std::vector<torch::Tensor>
 f3s1tb1rw(
   torch::Tensor rowWindowOffset,
@@ -289,38 +277,6 @@ f3s1tb1rwScheduledPermuteVScaleQK(
 }
 
 std::vector<torch::Tensor>
-sddmm1tbnrw(
-  torch::Tensor rowWindowOffset,
-  torch::Tensor tbBoundaries,
-  torch::Tensor tcbRowid,
-  torch::Tensor sparseAToXidx, 
-  torch::Tensor tcbBitMap,
-  int nNodes, 
-  torch::Tensor Q, torch::Tensor K,
-  int nWarpPerBlock
-){
-  CHECK_INPUT(rowWindowOffset);
-  CHECK_INPUT(tbBoundaries);
-  CHECK_INPUT(tcbRowid);
-  CHECK_INPUT(sparseAToXidx);
-  CHECK_INPUT(tcbBitMap);
-  CHECK_INPUT(Q);
-  CHECK_INPUT(K);
-  int embeddingDim = Q.size(1);
-  std::vector<torch::Tensor> result;
-  result = sddmmCuda1tbnrw(rowWindowOffset, 
-                           tbBoundaries, 
-                           tcbRowid, 
-                           sparseAToXidx, 
-                           tcbBitMap, 
-                           nNodes, 
-                           embeddingDim,
-                           Q, K,
-                           nWarpPerBlock);
-  return result;
-}
-
-std::vector<torch::Tensor>
 f3s1tb1tcb(torch::Tensor rowWindowOffset,
           torch::Tensor sparseAToXidx, 
           torch::Tensor tcbBitMap,
@@ -353,6 +309,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("f3s_1tb1rw_scheduled", &f3s1tb1rwScheduled, "fused3S 1tb1rw scheduled");
   m.def("f3s_1tb1rw_scheduled_permuteV", &f3s1tb1rwScheduledPermuteV, "fused3S 1tb1rw scheduled permuteV");
   m.def("f3s_1tb1rw_scheduled_permuteV_scaleQK", &f3s1tb1rwScheduledPermuteVScaleQK, "fused3S 1tb1rw scheduled permuteV scaleQK");
-  m.def("sddmm_1tbnrw", &sddmm1tbnrw, "sddmm 1tbnrw");
 }
 
