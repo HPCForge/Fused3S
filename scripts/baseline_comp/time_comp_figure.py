@@ -353,7 +353,7 @@ def generate_plot_with_algs(df, algs_dict, baseline_pair, datasets, dataset_offs
     if args.batched:
         plt.savefig(f'{args.data_path}/speedup_batched_{args.series_type}_comp_{args.gpu_name}/speedup_{args.series_type}_batched_{args.gpu_name}{filename_suffix}.png', dpi=300, bbox_inches='tight')
     else:
-        plt.savefig(f'{args.data_path}/speedup_unbatched_{args.series_type}_comp_{args.gpu_name}/speedup_{args.series_type}_unbatched_{args.gpu_name}{filename_suffix}.png', dpi=300, bbox_inches='tight')
+        plt.savefig(f'{args.data_path}/speedup_full_graph_{args.series_type}_comp_{args.gpu_name}/speedup_{args.series_type}_full_graph_{args.gpu_name}{filename_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 if __name__ == "__main__":
