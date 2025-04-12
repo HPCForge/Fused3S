@@ -11,3 +11,5 @@ src/build
 **/dist
 **/F3S.egg-info
 test/
+!scripts/baseline_comp/kernel_only_comp_results/*.csv
+!scripts/baseline_comp/kernel_only_comp_results/*/*.png

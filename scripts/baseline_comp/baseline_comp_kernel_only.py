@@ -19,27 +19,24 @@ from torch_geometric.typing import (
     SparseTensor,
 )
 
-
-# datasets = ["reddit", "amazonProducts", "yelp", "amazon0505", 
-#             "Artist", "Blog", "com-amazon.ungraph", "github", 
-#             "Ell", "ogbn-products", "citeseer", "pubmed", "cora",
-#             "igb_small", "igb_medium"]
-
 # datasets = ["ZINC", "PascalVOC-SP", "COCO-SP", "Peptides-func", "Peptides-struct"]
 datasets = ["citeseer", "cora", "pubmed", "Ell", "github", 
             "Artist", "com-amazon.ungraph", "Blog", 
             "amazon0505", "igb_small", "yelp", "reddit", 
-            "igb_medium", "ogbn-products", "igb_large", "ogbn-papers100M", "amazonProducts", 
-            
-            "ZINC", "PascalVOC-SP", "COCO-SP", "Peptides-func", "Peptides-struct"]
+            "igb_medium", "ogbn-products", "amazonProducts"]
+
+large_datasets = ["igb_large", "ogbn-papers100M"]
+
+batched_datasets = ["ZINC", "PascalVOC-SP", "COCO-SP", "Peptides-func", "Peptides-struct", 
+            "ogbg-molhiv", "ogbg-ppa", "ogbg-molpcba", "ogbg-code2"]
 
 algs = ['f3s_1tb1tcb', 'f3s_1tb1rw', 'f3s_1tb1rw_no_softmax', 
         'f3s_1tb1rw_scheduled', 'f3s_1tb1rw_scheduled_permuteV',
         'flashSparse_no_softmax', 'flashSparse_naive_softmax', 'flashSparse_stable_softmax', 
         'dfgnn_tiling', 'dfgnn_hyper', 'pyg_gtconv']
 
-data_path = "/workspace/washington/F3s-dataset"
-temp_data_path = "/workspace/washington/F3s-tempData"
+data_path = "/share/crsp/lab/amowli/share/Fused3S/dataset"
+temp_data_path = "/share/crsp/lab/amowli/share/Fused3S/dataLoader"
 
 def check_gpu_memory():
   if torch.cuda.is_available():
@@ -385,6 +382,7 @@ def flashSparse_preprocess_dataset(args, graphInfo):
   window = 8
   wide = 16
   inputInfo = InputInfo()
+  inputInfo.name = graphInfo.name
   inputInfo.orig_row_pointers = graphInfo.get_row_pointers()
   inputInfo.row_pointers, inputInfo.column_index, \
   inputInfo.degrees, inputInfo.t_window_rowTensor, \
@@ -508,10 +506,10 @@ def route_dfgnn(args, graphInfo, perf):
     dfgnn_tiling = GTConvFuse_inference_tiling
     dfgnn_hyper = GTConvFuse_inference_hyper
 
-  num_heads = 1
-  Q = torch.rand(graphInfo.num_nodes, num_heads, args.embedding_dim, dtype=torch.float32, device=args.dev)
-  K = torch.rand(graphInfo.num_nodes, num_heads, args.embedding_dim, dtype=torch.float32, device=args.dev)
-  V = torch.rand(graphInfo.num_nodes, num_heads, args.embedding_dim, dtype=torch.float32, device=args.dev)
+  Q = graphInfo.Q_host.unsqueeze(1).cuda()
+  K = graphInfo.K_host.unsqueeze(1).cuda()
+  V = graphInfo.V_host.unsqueeze(1).cuda()
+  check_gpu_memory()
   row_pointers = graphInfo.get_row_pointers()
   column_index = graphInfo.get_column_index()
   num_edges = graphInfo.num_edges
@@ -726,6 +724,8 @@ def load_dataset(dataset_name, args):
     return load_dataset_batchDGL(dataset_name, args)
   elif dataset_name in ["COCO-SP", "Peptides-func", "PascalVOC-SP", "Peptides-struct"]:
     return load_dataset_batchPyG(dataset_name, args)
+  elif dataset_name in ["ogbg-molhiv", "ogbg-ppa", "ogbg-molpcba", "ogbg-code2"]:
+    return load_dataset_batchOGB(dataset_name, args)
   else:
     return load_dataset_npz(dataset_name, args)
 
@@ -775,6 +775,26 @@ def load_dataset_batchPyG(dataset_name, args):
   graphInfo = GraphInfo(dataset_name, adj, args.embedding_dim)
   return graphInfo
   
+def load_dataset_batchOGB(dataset_name, args):
+  from torch_geometric.data import Batch
+  from torch_geometric.utils import to_scipy_sparse_matrix
+  from ogb.graphproppred import PygGraphPropPredDataset
+  from torch_geometric.data.data import DataEdgeAttr
+  from torch_geometric.data.data import DataTensorAttr
+  from torch_geometric.data.storage import GlobalStorage
+  torch.serialization.add_safe_globals([GlobalStorage])
+  torch.serialization.add_safe_globals([DataTensorAttr])
+  torch.serialization.add_safe_globals([DataEdgeAttr])
+  print(f"===========loading dataset: {dataset_name}===========")
+  dataset = PygGraphPropPredDataset(name=dataset_name, root=f"{temp_data_path}/{dataset_name}")
+  #create a batched graph
+  batched_g = Batch.from_data_list([dataset[i] for i in range(args.batch_size)])
+  adj = to_scipy_sparse_matrix(batched_g.edge_index, num_nodes=batched_g.num_nodes)
+  adj = adj.tocsr()
+  print(f"adj nnz: {adj.nnz}, num_nodes: {adj.shape}")
+  graphInfo = GraphInfo(dataset_name, adj, args.embedding_dim)
+  return graphInfo
+
 def main(args):
   num_heads = 1
   args.dev = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -782,6 +802,10 @@ def main(args):
     test_dataset = [args.dataset]
   else:
     test_dataset = datasets
+    if args.batched:
+      test_dataset.extend(batched_datasets)
+    if args.large:
+      test_dataset.extend(large_datasets)
   if args.method == "all":
     test_algs = algs
   else:
@@ -800,10 +824,14 @@ if __name__ == "__main__":
                        help='Dimension of node embeddings')
     parser.add_argument('--n_warp_per_block', '-nw', type=int, default=8,
                        help='Number of warps per block')
+    parser.add_argument('--batched', '-b', action='store_true',
+                       help='Use batched graph')
+    parser.add_argument('--large', '-l', action='store_true',
+                       help='Use large graph')
     parser.add_argument('--batch_size', '-bs', type=int, default=1024,
                        help='Batch size, only valid for batch graph')
     parser.add_argument('--dataset', '-d', type=str, default="reddit",
-                       choices=datasets + ["all"])
+                       choices=datasets + batched_datasets + large_datasets + ["all"])
     parser.add_argument('--method', '-m', type=str, default="f3s",
                        choices=["f3s", "flashSparse", "df-gnn", "pyg", "all"])
     parser.add_argument("--alg", '-a', type=str, default='f3s_1tb1rw_scheduled_permuteV', 
