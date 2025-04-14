@@ -55,6 +55,10 @@ algs_colors = {
     'pyg_gtconv': '#808080',
 }
 
+# Width of each bar and positions of the bars
+bar_width = 0.08
+# Set font size
+font_size = 16
 def report_speedup(all_data, datasets):
     # Calculate geometric mean speedups
     # 1. f3s_1tb1rw_scheduled_permuteV over df-gnn_tiling
@@ -154,11 +158,6 @@ def choose_datasets(args):
 
 def main(args):
     datasets = choose_datasets(args)
-    # Set font size
-    font_size = 16
-    plt.rcParams.update({'font.size': font_size})
-    # Width of each bar and positions of the bars
-    bar_width = 0.08
     dataset_offset = np.arange(len(datasets))
     
     # Read the data
@@ -172,61 +171,37 @@ def main(args):
     # Generate series of plots
     if args.series_type == "external":
         # External comparison - use dfgnn_tiling as baseline
-        algorithm_groups = [
-            ['f3s_1tb1rw_scheduled_permuteV'],  # F3S alone
-            ['f3s_1tb1rw_scheduled_permuteV', 'dfgnn_hyper'],  # F3S + DF-GNN
-            ['f3s_1tb1rw_scheduled_permuteV', 'dfgnn_hyper', 
-             'flashSparse_naive_softmax'],  # F3S + DF-GNN + FlashSparse (naive)
-            ['f3s_1tb1rw_scheduled_permuteV', 'dfgnn_hyper', 
-             'flashSparse_naive_softmax', 'flashSparse_stable_softmax'],  # F3S + DF-GNN + FlashSparse (naive + stable)
-            ['f3s_1tb1rw_scheduled_permuteV', 'dfgnn_hyper', 
+        algorithms = ['f3s_1tb1rw_scheduled_permuteV', 'dfgnn_hyper', 
              'flashSparse_naive_softmax', 'flashSparse_stable_softmax',
-             'pyg_gtconv'],  # All algorithms
-        ]
-        series_names = ["f3s_only", "f3s_dfgnn", "f3s_dfgnn_flash_naive", "f3s_dfgnn_flash_naive_stable", "all"]
+             'pyg_gtconv']
         baseline_alg = 'dfgnn_tiling'
     elif args.series_type == "internal":
         # Internal comparison - use f3s_1tb1tcb as baseline
-        algorithm_groups = [
-            ['f3s_1tb1tcb', 'f3s_1tb1rw'],  # + Row-wise
-            ['f3s_1tb1tcb', 'f3s_1tb1rw', 'f3s_1tb1rw_scheduled'],  # + Scheduled
-            ['f3s_1tb1tcb', 'f3s_1tb1rw', 'f3s_1tb1rw_scheduled', 'f3s_1tb1rw_scheduled_permuteV'],  # + PermuteV
-        ]
-        series_names = ["row_wise", "scheduled", "permuted"]
+        algorithms = ['f3s_1tb1rw', 'f3s_1tb1rw_scheduled', 'f3s_1tb1rw_scheduled_permuteV']
         baseline_alg = 'f3s_1tb1tcb'
     elif args.series_type == "all":
-        algorithm_groups = [
-            ['f3s_1tb1tcb', 'f3s_1tb1rw', 'f3s_1tb1rw_scheduled', 'f3s_1tb1rw_scheduled_permuteV',
+        algorithms = ['f3s_1tb1tcb', 'f3s_1tb1rw', 'f3s_1tb1rw_scheduled', 'f3s_1tb1rw_scheduled_permuteV',
              'flashSparse_naive_softmax', 'flashSparse_stable_softmax',
-             'dfgnn_hyper', 'dfgnn_tiling', 'pyg_gtconv'],  # All algorithms
-        ]
-        series_names = ["all"]
+             'dfgnn_hyper', 'pyg_gtconv']
         baseline_alg = 'dfgnn_tiling'
     else:
         raise ValueError(f"Unknown series type: {args.series_type}")
     
     baseline_display = algs_original_display_name_dict[baseline_alg]
     baseline_pair = (baseline_alg, baseline_display)
-    
-    for group_idx, group in enumerate(algorithm_groups):
-        # Skip baseline in the algorithm list if it's included
-        current_group = [alg for alg in group if alg != baseline_alg]
-        generate_plot(df, current_group, baseline_pair, datasets, dataset_offset, bar_width, font_size, 
-                     series_names[group_idx], args)
+    all_data, max_speedup = process_data(df, datasets, algs_original_display_name_dict, baseline_pair)
+    series_ind = 0
+    while len(algorithms) > 0:
+        # Create a copy of the original display name dict to work with
+        current_algs_dict = {alg: algs_original_display_name_dict[alg] for alg in algorithms if alg in algs_original_display_name_dict}
+        # Generate the plot with the specified baseline
+        generate_plot_with_algs(datasets, current_algs_dict, baseline_pair, all_data, max_speedup, 
+                               dataset_offset, args, series_ind)
+        # Remove the last algorithm from the list
+        algorithms.pop()
+        series_ind += 1
 
-def generate_plot(df, alg_list, baseline_pair, datasets, dataset_offset, bar_width, font_size, series_name, args):
-    # Create a copy of the original display name dict to work with
-    current_algs_dict = {alg: algs_original_display_name_dict[alg] for alg in alg_list if alg in algs_original_display_name_dict}
-    
-    # Generate the plot with the specified baseline
-    generate_plot_with_algs(df, current_algs_dict, baseline_pair, datasets, 
-                           dataset_offset, bar_width, font_size, args, series_name)
-
-def generate_plot_with_algs(df, algs_dict, baseline_pair, datasets, dataset_offset, 
-                          bar_width, font_size, args, series_name=None):
-    # Create figure and axis with larger size
-    plt.figure(figsize=(24, 6))
-    
+def process_data(df, datasets, algs_dict, baseline_pair):
     # Dictionary to store all data
     all_data = {}
     baseline_data = []
@@ -258,9 +233,17 @@ def generate_plot_with_algs(df, algs_dict, baseline_pair, datasets, dataset_offs
             else:
                 speedup = baseline/value
             all_data[alg].append(speedup)
-    
+    # get max speedup 
+    max_speedup = max([max(values) for alg, values in all_data.items() if values and not all(np.isnan(v) for v in values)], default=2.0)
     if args.series_type == "all":
         report_speedup(all_data, datasets)
+    return all_data, max_speedup
+
+def generate_plot_with_algs(datasets, algs_dict, baseline_pair, all_data, max_speedup, 
+                          dataset_offset, args, series_ind):
+    # Create figure and axis with larger size
+    plt.figure(figsize=(24, 6))
+    plt.rcParams.update({'font.size': font_size})
 
     # Plot bars for each algorithm
     handles = []
@@ -318,19 +301,15 @@ def generate_plot_with_algs(df, algs_dict, baseline_pair, datasets, dataset_offs
     plt.yticks(fontsize=font_size)
 
     # Create legend with two columns
-    if not args.no_legend:
-        plt.legend(handles, labels, loc='upper left', 
-                   bbox_to_anchor=(0, 1.4),
-                   fontsize=font_size, 
-                   ncol=3)
+    plt.legend(handles, labels, loc='upper left', 
+                bbox_to_anchor=(0, 1.4),
+                fontsize=font_size, 
+                ncol=3)
 
     # Set x-axis limits to reduce padding
     plt.xlim(-0.2, len(datasets) - 0.3)
     # Set y-axis to log2 scale and customize ticks
     plt.yscale('log', base=2)
-
-    # Find the maximum speedup value
-    max_speedup = max([max(values) for alg, values in all_data.items() if values and not all(np.isnan(v) for v in values)], default=2.0)
 
     # Generate tick positions for powers of 2 up to near the max
     max_power = int(np.floor(np.log2(max_speedup)))
@@ -348,7 +327,7 @@ def generate_plot_with_algs(df, algs_dict, baseline_pair, datasets, dataset_offs
     plt.tight_layout()
 
     # Save the figure
-    filename_suffix = f"_{series_name}" if series_name else ""
+    filename_suffix = f"_{series_ind}"
     
     if args.batched:
         plt.savefig(f'{args.data_path}/speedup_batched_{args.series_type}_comp_{args.gpu_name}/speedup_{args.series_type}_batched_{args.gpu_name}{filename_suffix}.png', dpi=300, bbox_inches='tight')
@@ -358,7 +337,6 @@ def generate_plot_with_algs(df, algs_dict, baseline_pair, datasets, dataset_offs
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--no_legend", action='store_true')
     parser.add_argument("--gpu_name", type=str, default="GH200")
     parser.add_argument("--batched", action='store_true')
     parser.add_argument("--data_path", type=str, default="kernel_only_comp_results")
