@@ -49,14 +49,14 @@ def plot_sm_activities(scheduled_data, unscheduled_data, scheduled_max, unschedu
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ_PARAMS['figure_size'], sharey=True)
     x = np.arange(len(scheduled_data))
     
-    # Plot scheduled data
-    ax1.bar(x, scheduled_data)
+    # Plot unscheduled data
+    ax1.bar(x, unscheduled_data)
     ax1.set_xlabel('SM Index', fontsize=VIZ_PARAMS['font_sizes']['xlabel'])
     ax1.set_ylabel('SM Active Time (ms)', fontsize=VIZ_PARAMS['font_sizes']['ylabel'])
-    ax1.set_title('Row Window Reordering', fontsize=VIZ_PARAMS['font_sizes']['title'], 
+    ax1.set_title('Default', fontsize=VIZ_PARAMS['font_sizes']['title'], 
                  pad=VIZ_PARAMS['title_padding'])
     ax1.grid(True, axis='y', alpha=VIZ_PARAMS['grid_alpha'])
-    mean_val = np.mean(scheduled_data)
+    mean_val = np.mean(unscheduled_data)
     ax1.axhline(y=mean_val, 
                 color=VIZ_PARAMS['mean_line_color'], 
                 linestyle=VIZ_PARAMS['mean_line_style'], 
@@ -64,15 +64,15 @@ def plot_sm_activities(scheduled_data, unscheduled_data, scheduled_max, unschedu
     ax1.legend(fontsize=VIZ_PARAMS['font_sizes']['legend'],
               loc='center right')
     ax1.tick_params(axis='both', which='major', labelsize=VIZ_PARAMS['font_sizes']['ticks'])
-    ax1.set_xlim(-0.9, len(scheduled_data) - 0.1)  # Reduce whitespace
+    ax1.set_xlim(-0.9, len(unscheduled_data) - 0.1)  # Reduce whitespace
     
-    # Plot unscheduled data
-    ax2.bar(x, unscheduled_data)
+    # Plot scheduled data
+    ax2.bar(x, scheduled_data)
     ax2.set_xlabel('SM Index', fontsize=VIZ_PARAMS['font_sizes']['xlabel'])
-    ax2.set_title('Default', fontsize=VIZ_PARAMS['font_sizes']['title'], 
+    ax2.set_title('Row Window Reordering', fontsize=VIZ_PARAMS['font_sizes']['title'], 
                  pad=VIZ_PARAMS['title_padding'])
     ax2.grid(True, axis='y', alpha=VIZ_PARAMS['grid_alpha'])
-    mean_val = np.mean(unscheduled_data)
+    mean_val = np.mean(scheduled_data)
     ax2.axhline(y=mean_val, 
                 color=VIZ_PARAMS['mean_line_color'], 
                 linestyle=VIZ_PARAMS['mean_line_style'], 
@@ -80,7 +80,7 @@ def plot_sm_activities(scheduled_data, unscheduled_data, scheduled_max, unschedu
     ax2.legend(fontsize=VIZ_PARAMS['font_sizes']['legend'],
               loc='center right')
     ax2.tick_params(axis='both', which='major', labelsize=VIZ_PARAMS['font_sizes']['ticks'])
-    ax2.set_xlim(-0.9, len(unscheduled_data) - 0.1)  # Reduce whitespace
+    ax2.set_xlim(-0.9, len(scheduled_data) - 0.1)  # Reduce whitespace
     
     # Set y-axis limits and ticks
     max_val = max(scheduled_max, unscheduled_max)
@@ -109,7 +109,7 @@ def main(args):
     
     # Create plots
     plot_sm_activities(scheduled_data, unscheduled_data, scheduled_max, unscheduled_max)
-    plt.savefig(f'sm_activity_comparison_{args.dataset}.png')
+    plt.savefig(f'SM_active_time_results/sm_activity_comparison_{args.dataset}.png')
     
     # Print some statistics
     print(f"Scheduled Version:")
