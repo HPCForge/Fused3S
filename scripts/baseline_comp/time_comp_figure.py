@@ -69,21 +69,31 @@ def report_speedup(all_data, datasets):
 
     # 2. f3s_1tb1rw_scheduled_permuteV over flashSparse_naive_softmax
     # First calculate speedups of flashSparse_naive_softmax over baseline
-    flash_speedups = all_data['flashSparse_naive_softmax'].copy()
+    flash_naive_speedups = all_data['flashSparse_naive_softmax'].copy()
+    flash_stable_speedups = all_data['flashSparse_stable_softmax'].copy()
     f3s_speedups = all_data['f3s_1tb1rw_scheduled_permuteV'].copy()
+    print(f"flash_naive_speedups: {len(flash_naive_speedups)}, flash_stable_speedups: {len(flash_stable_speedups)}, f3s_speedups: {len(f3s_speedups)}, datasets: {len(datasets)}")
+    print(f"datasets: {datasets}")
 
     # Calculate relative speedup for each dataset
-    f3s_vs_flash = []
+    f3s_vs_flash_naive = []
+    f3s_vs_flash_stable = []
     for i in range(len(datasets)):
-        if not np.isnan(flash_speedups[i]) and not np.isnan(f3s_speedups[i]) and flash_speedups[i] != 0:
+        if not np.isnan(flash_naive_speedups[i]) and not np.isnan(f3s_speedups[i]) and flash_naive_speedups[i] != 0:
             # This gives f3s speedup relative to flashSparse
-            relative_speedup = f3s_speedups[i] / flash_speedups[i]
-            f3s_vs_flash.append(relative_speedup)
+            relative_speedup = f3s_speedups[i] / flash_naive_speedups[i]
+            f3s_vs_flash_naive.append(relative_speedup)
+        if not np.isnan(flash_stable_speedups[i]) and not np.isnan(f3s_speedups[i]) and flash_stable_speedups[i] != 0:
+            # This gives f3s speedup relative to flashSparse
+            relative_speedup = f3s_speedups[i] / flash_stable_speedups[i]
+            f3s_vs_flash_stable.append(relative_speedup)
 
-    geomean_f3s_vs_flash = stats.gmean(f3s_vs_flash) if f3s_vs_flash else np.nan
+    geomean_f3s_vs_flash_naive = stats.gmean(f3s_vs_flash_naive) if f3s_vs_flash_naive else np.nan
+    geomean_f3s_vs_flash_stable = stats.gmean(f3s_vs_flash_stable) if f3s_vs_flash_stable else np.nan
 
     print(f"Geometric mean of f3s_1tb1rw_scheduled_permuteV over df-gnn_tiling: {geomean_f3s_vs_dfgnn}")
-    print(f"Geometric mean of f3s_1tb1rw_scheduled_permuteV over flashSparse_naive_softmax: {geomean_f3s_vs_flash}")
+    print(f"Geometric mean of f3s_1tb1rw_scheduled_permuteV over flashSparse_naive_softmax: {geomean_f3s_vs_flash_naive}")
+    print(f"Geometric mean of f3s_1tb1rw_scheduled_permuteV over flashSparse_stable_softmax: {geomean_f3s_vs_flash_stable}")
 
     f3s_1tb1rw_speedups = all_data['f3s_1tb1rw'].copy()
     f3s_1tb1tcb_speedups = all_data['f3s_1tb1tcb'].copy()
@@ -125,24 +135,6 @@ def report_speedup(all_data, datasets):
     print(f"4. Geometric mean of f3s_1tb1rw_scheduled over f3s_1tb1rw (only for datasets where scheduled is faster): {geomean_f3s_1tb1rw_scheduled_faster:.4f}x")
     print(f"Datasets where f3s_1tb1rw_scheduled is faster than f3s_1tb1rw: {faster_datasets}")
 
-# def choose_algs(algs_set):
-#     if algs_set == "all":
-#         baseline_alg = 'dfgnn_tiling'
-#     elif algs_set == "internal":
-#         baseline_alg = 'f3s_1tb1tcb'
-#         algs_original_display_name_dict.pop('dfgnn_tiling')
-#         algs_original_display_name_dict.pop('dfgnn_hyper')
-#         algs_original_display_name_dict.pop('pyg_gtconv')
-#         algs_original_display_name_dict.pop('flashSparse_naive_softmax')
-#         algs_original_display_name_dict.pop('flashSparse_stable_softmax')
-#     elif algs_set == "external":
-#         baseline_alg = 'dfgnn_tiling'
-#         algs_original_display_name_dict.pop('f3s_1tb1rw')
-#         algs_original_display_name_dict.pop('f3s_1tb1tcb')
-#         algs_original_display_name_dict.pop('f3s_1tb1rw_scheduled')
-#     baseline_pair = (baseline_alg, algs_original_display_name_dict.pop(baseline_alg))
-#     return algs_original_display_name_dict, baseline_pair
-
 def choose_datasets(args):
     if args.batched:
         datasets = ["ZINC", "PascalVOC-SP", "COCO-SP", 
@@ -153,8 +145,9 @@ def choose_datasets(args):
                     "Artist", "com-amazon.ungraph", "Blog", 
                     "amazon0505", "igb_small", "yelp", "reddit", 
                     "igb_medium", "ogbn-products", "amazonProducts"]
+        if args.gpu_name == "A30":
+            datasets.remove("igb_medium")
     return datasets
-
 
 def main(args):
     datasets = choose_datasets(args)
@@ -242,7 +235,10 @@ def process_data(df, datasets, algs_dict, baseline_pair):
 def generate_plot_with_algs(datasets, algs_dict, baseline_pair, all_data, max_speedup, 
                           dataset_offset, args, series_ind):
     # Create figure and axis with larger size
-    plt.figure(figsize=(24, 6))
+    if args.legend:
+        plt.figure(figsize=(24, 6))
+    else:
+        plt.figure(figsize=(24, 4.5))
     plt.rcParams.update({'font.size': font_size})
 
     # Plot bars for each algorithm
@@ -301,10 +297,12 @@ def generate_plot_with_algs(datasets, algs_dict, baseline_pair, all_data, max_sp
     plt.yticks(fontsize=font_size)
 
     # Create legend with two columns
-    plt.legend(handles, labels, loc='upper left', 
-                bbox_to_anchor=(0, 1.4),
-                fontsize=font_size, 
-                ncol=3)
+    if args.legend:
+        print(f"handles: {handles}, labels: {labels}")
+        plt.legend(handles, labels, loc='upper left', 
+                    bbox_to_anchor=(0, 1.25),
+                    fontsize=font_size, 
+                    ncol=5)
 
     # Set x-axis limits to reduce padding
     plt.xlim(-0.2, len(datasets) - 0.3)
@@ -328,17 +326,23 @@ def generate_plot_with_algs(datasets, algs_dict, baseline_pair, all_data, max_sp
 
     # Save the figure
     filename_suffix = f"_{series_ind}"
-    
     if args.batched:
-        plt.savefig(f'{args.data_path}/speedup_batched_{args.series_type}_comp_{args.gpu_name}/speedup_{args.series_type}_batched_{args.gpu_name}{filename_suffix}.png', dpi=300, bbox_inches='tight')
+        sub_path = f'batched/'
     else:
-        plt.savefig(f'{args.data_path}/speedup_full_graph_{args.series_type}_comp_{args.gpu_name}/speedup_{args.series_type}_full_graph_{args.gpu_name}{filename_suffix}.png', dpi=300, bbox_inches='tight')
+        sub_path = f'full_graph/'
+
+    if args.series_type == "all":
+        fig_path = f'{args.data_path}/{sub_path}/'
+    else:
+        fig_path = f'{args.data_path}/{sub_path}/{args.series_type}_comp_{args.gpu_name}/'
+    plt.savefig(f'{fig_path}/speedup_{args.series_type}_{args.gpu_name}{filename_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--gpu_name", type=str, default="GH200")
     parser.add_argument("--batched", action='store_true')
+    parser.add_argument("--legend", action='store_true')
     parser.add_argument("--data_path", type=str, default="kernel_only_comp_results")
     parser.add_argument("--series_type", type=str, default="external", 
                         choices=["external", "internal", "all"],
