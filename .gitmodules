@@ -1,9 +1,12 @@
 [submodule "baselines/DF-GNN"]
 	path = baselines/DF-GNN
 	url = git@github.com:zli96/DF-GNN.git
-[submodule "baselines/DTC-SpMM_ASPLOS24"]
-	path = baselines/DTC-SpMM_ASPLOS24
-	url = https://github.com/danielhse/DTC-SpMM_ASPLOS24.git
-[submodule "baselines/smat"]
-	path = baselines/smat
-	url = https://github.com/danielhse/smat.git
+[submodule "baselines/magicube"]
+	path = baselines/magicube
+	url = git@github.com:zli96/Magicube_int16.git
+[submodule "baselines/flashSparse"]
+	path = baselines/flashSparse
+	url = git@github.com:zli96/flashSparse.git
+[submodule "baselines/graphtransformer"]
+	path = baselines/graphtransformer
+	url = git@github.com:zli96/graphtransformer.git

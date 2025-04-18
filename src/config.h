@@ -1,7 +1,7 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-#define BLK_8 8
+#define NUM_SM_GPU 56 // A30
 
 #define BLK_H 16 
 #define BLK_W 8

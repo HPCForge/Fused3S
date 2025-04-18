@@ -4,23 +4,34 @@
 #include <fstream>
 #include <sstream>
 #include <stdio.h>
+#include <vector>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 #include <thrust/sort.h>
 #include <thrust/unique.h>
+#include <thrust/execution_policy.h>
+#include <thrust/sequence.h>
+#include <thrust/adjacent_difference.h>
 #include <torch/extension.h>
-#include <vector>
 
 //////////////////////////////////////////////////////////////////////
 /// Preprocessing
 //////////////////////////////////////////////////////////////////////
 // assuming each tcblock can be divided into 8x8 (64 bits) sub-blocks
-// local_id is the id of the element in tcblock
+// sub_blocks are organized in column-major order
+// elements inside each sub-block are organized in row-major order
 __device__ void update_bitmap(uint64_t* bitmap, 
-                              int tcblock_id, int n_sub_blocks_per_tcblock, int local_id) {
+                              int tcblock_id, int n_sub_blocks_per_tcblock, 
+                              int blockSize_h, int blockSize_w,
+                              int row_local, int col_local) {
+  int n_sub_blocks_per_row = blockSize_w / 8;
+  int n_sub_blocks_per_col = blockSize_h / 8;
   unsigned long long int *ull_bitmap = reinterpret_cast<unsigned long long int*>(bitmap);
-  int sub_block_id = local_id / 64;
-  uint64_t mask = 1ULL << (63 - local_id % 64);
+  int sub_block_row_id = row_local / 8;
+  int sub_block_col_id = col_local / 8;
+  int sub_block_id = sub_block_col_id * n_sub_blocks_per_col + sub_block_row_id;
+  int sub_block_local_id = row_local % 8 * 8 + col_local % 8;
+  uint64_t mask = 1ULL << (63 - sub_block_local_id);
   atomicOr(&ull_bitmap[tcblock_id * n_sub_blocks_per_tcblock + sub_block_id], mask);
 }
 
@@ -58,9 +69,10 @@ void generate_tcblock_rowid_cuda(int *rowwindow_offset, int *tcblock_rowid,
   int window_count = num_row_windows;
   generate_tcblock_rowid<<<window_count, block_size>>>(
       rowwindow_offset, tcblock_rowid, num_row_windows);
-  cudaError_t error = cudaGetLastError();
+  cudaDeviceSynchronize();
+  cudaError_t error = cudaGetLastError(); 
   if (error != cudaSuccess) {
-    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    printf("CUDA error in generate_tcblock_rowid_cuda: %s\n", cudaGetErrorString(error));
     exit(-1);
   }
 }
@@ -149,12 +161,10 @@ void generate_edgetocolumn_cuda(int *nodePointer, int *edgelist,
   generate_edgetocolumn<<<window_count, block_size>>>(
       nodePointer, edgelist, edgelist_sort, edgetocol, blockpartition, blocknum,
       blockSize_h, blockSize_w, num_nodes);
-  // generate_edgetocolumn_v1<<< window_count, block_size >>> (nodePointer,
-  // edgelist, edgelist_sort, edgetocol, blockpartition, blocknum, blockSize_h,
-  // blockSize_w, num_nodes);
+  cudaDeviceSynchronize();
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
-    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    printf("CUDA error in generate_edgetocolumn_cuda: %s\n", cudaGetErrorString(error));
     exit(-1);
   }
 }
@@ -207,7 +217,7 @@ __global__ void generate_tcoffset_id_atob(
     unsigned col_local = col % blockSize_w;
     tileid[tcblock_offset_ptr[tcblock_id] + pos_ptr[tcblock_id]] =
         (uint8_t)(row_local * blockSize_w + col_local);
-    update_bitmap(tcblock_bit_map, block_start + tcblock_id, n_sub_blocks_per_tcblock, int(row_local * blockSize_w + col_local));
+    update_bitmap(tcblock_bit_map, block_start + tcblock_id, n_sub_blocks_per_tcblock, blockSize_w, blockSize_h, row_local, col_local);
     sparse_AToB[tcblock_id * blockSize_w + col_local] = edgeList[e_index];
     pos_ptr[tcblock_id]++;
   }
@@ -224,8 +234,15 @@ void generate_tcoffset_id_atob_cuda(int *nodePointer, int *rowwindow_offset,
   int window_count = num_row_windows;
   const int dynamic_shared_size = (2 * max_block + 1) * sizeof(int);
   std::cout << "dynamic_shared_size: " << dynamic_shared_size << std::endl;
-  if (dynamic_shared_size > 98304) {
-    int maxbytes = 131072; // 96 KB
+  if (dynamic_shared_size > 204800) {
+    printf("dynamic_shared_size: %d is greater than 204800\n", dynamic_shared_size);
+    exit(-1);
+  } else if (dynamic_shared_size > 131072) {
+    int maxbytes = 204800; // 200 KB
+    cudaFuncSetAttribute(generate_tcoffset_id_atob,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes);
+  } else if (dynamic_shared_size > 98304) {
+    int maxbytes = 131072; // 128 KB
     cudaFuncSetAttribute(generate_tcoffset_id_atob,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes);
   } else if (dynamic_shared_size > 65536) {
@@ -233,7 +250,7 @@ void generate_tcoffset_id_atob_cuda(int *nodePointer, int *rowwindow_offset,
     cudaFuncSetAttribute(generate_tcoffset_id_atob,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes);
   } else if (dynamic_shared_size > 32768) {
-    int maxbytes = 65536; // 128 KB
+    int maxbytes = 65536; // 64 KB
     cudaFuncSetAttribute(generate_tcoffset_id_atob,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes);
   }
@@ -241,9 +258,10 @@ void generate_tcoffset_id_atob_cuda(int *nodePointer, int *rowwindow_offset,
       nodePointer, rowwindow_offset, edgeToColumn, edgeToRow, edgeList,
       tcblock_offset, tcblock_tileid, sparseatob, tcblock_bit_map, max_block, num_nodes,
       blockSize_h, blockSize_w, num_row_windows);
+  cudaDeviceSynchronize();
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
-    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    printf("CUDA error in generate_tcoffset_id_atob_cuda: %s\n", cudaGetErrorString(error));
     exit(-1);
   }
 }
@@ -300,7 +318,7 @@ seg_sort_dequ(int *seg, int *edgeLists, int *nodepointer, int *edgetocol,
   auto tcblock_offset_tensor = torch::zeros({block_counter + 1}, options_gpu);
   auto sparse_AToX_index_tensor =
       torch::zeros({block_counter * blockSize_w}, options_gpu);
-  int bit_map_size = BLK_M * BLK_N;
+  int bit_map_size = blockSize_h * blockSize_w;
   assert(bit_map_size % 64 == 0);
   int bit_map_int64_size = bit_map_size / 64;
   auto tcblock_bit_map_tensor = torch::zeros({block_counter*bit_map_int64_size}, options_gpu_uint64);
@@ -324,28 +342,27 @@ seg_sort_dequ(int *seg, int *edgeLists, int *nodepointer, int *edgetocol,
 
 __global__ void fill_edgeToRow(int *edgeToRow, int *nodePointer,
                                int num_nodes) {
-  int tid = blockDim.x * blockIdx.x + threadIdx.x;
-  int nid = tid / 32;
-  int laneid = tid % 32;
-  // check a valid node range.
-  if (nid < num_nodes) {
-#pragma unroll
-    for (int eid = nodePointer[nid] + laneid; eid < nodePointer[nid + 1];
-         eid += 32) {
+  int wid = threadIdx.y;
+  int bid = blockIdx.x;
+  for(int nid = bid*blockDim.y + wid; nid < num_nodes; nid += blockDim.y*gridDim.x) {
+    for (int eid = nodePointer[nid] + threadIdx.x; eid < nodePointer[nid + 1]; eid += 32) {
       edgeToRow[eid] = nid;
     }
   }
 }
 
-void fill_edgeToRow_cuda(int *edgeToRow, int *nodePointer, int num_nodes) {
-  int wrap_size = 32;
-  int block_size = 1024;
-  int grid_size = (num_nodes * wrap_size + block_size - 1) / block_size;
-  fill_edgeToRow<<<grid_size, block_size>>>(edgeToRow, nodePointer, num_nodes);
+void fill_edgeToRow_cuda(int *edgeToRow, int *nodePointer, int numNodes) {
+  int warpSize = 32;
+  int nWarpPerBlock = 32;
+  dim3 blockSize(warpSize, nWarpPerBlock);
+  long long gridSize = (static_cast<long long>(numNodes) + nWarpPerBlock - 1) / nWarpPerBlock;
+  int gridSize_int = std::min(gridSize, static_cast<long long>(10000));
+  fill_edgeToRow<<<gridSize_int, blockSize>>>(edgeToRow, nodePointer, numNodes);
+  cudaDeviceSynchronize();
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
     // print the CUDA error message and exit
-    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    printf("CUDA error in fill_edgeToRow_cuda: %s\n", cudaGetErrorString(error));
     exit(-1);
   }
 }
@@ -370,9 +387,45 @@ void fill_segment_cuda(int *nodePointer, int *seg_out, int blockSize_h,
   int window_count = (num_nodes + blockSize_h - 1) / blockSize_h;
   fill_segment<<<window_count, block_size>>>(nodePointer, seg_out, blockSize_h,
                                              blockSize_w, num_nodes);
+  cudaDeviceSynchronize();
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
-    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    printf("CUDA error in fill_segment_cuda: %s\n", cudaGetErrorString(error));
     exit(-1);
   }
+}
+
+// Sort row windows by number of TCBlocks in descending order
+// Returns array where sorted_row_window[i] contains index of row window with i-th most TCBlocks
+torch::Tensor sort_row_windows_by_tcb_count(const int* rowwindow_offset, int num_row_windows) {
+  auto options_gpu = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+  
+  // Create vectors for (count, index) pairs
+  thrust::device_vector<int> counts(num_row_windows+1);
+  thrust::device_vector<int> indices(num_row_windows);
+  thrust::sequence(indices.begin(), indices.end());
+  
+  // Calculate TCBlock counts for each window
+  // the first element of count = rowwindow_offset[0], has to be skipped
+  thrust::adjacent_difference(
+      rowwindow_offset,                         // Input start
+      rowwindow_offset + num_row_windows + 1,  // Input end
+      counts.begin()                            // Output start
+  );
+  
+  // Sort by counts in descending order while keeping track of original indices
+  thrust::sort_by_key(
+    thrust::device,
+    counts.begin()+1,
+    counts.end(),
+    indices.begin(),
+    thrust::greater<int>()
+  );
+  
+  // Create and return tensor with sorted indices
+  auto sorted_row_window = torch::zeros({num_row_windows}, options_gpu);
+  thrust::copy(indices.begin(), indices.end(), 
+               thrust::device_pointer_cast(sorted_row_window.data_ptr<int>()));
+  
+  return sorted_row_window;
 }
