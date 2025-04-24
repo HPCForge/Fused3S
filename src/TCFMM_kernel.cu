@@ -6,10 +6,6 @@
 #include <mma.h>
 #include <sstream>
 #include <stdio.h>
-// #include <thrust/device_vector.h>
-// #include <thrust/host_vector.h>
-// #include <thrust/sort.h>
-// #include <thrust/unique.h>
 #include <torch/extension.h>
 #include <vector>
 #include "ptx.h"
@@ -20,26 +16,6 @@ union half2_uint32 {
     half2 h2;
     uint32_t u32;
 };
-
-// Assume each warp has a 8x8 fp16 matrix in row-major order distributed among threads
-// Each thread starts with 2 consecutive fp16 values as a half2 (val)
-// This function redistributes elements among threads 
-// so that val becomes 2 consecutive fp16 values in column-major order
-__device__ void shfl_transpose_warp(half2 &val, int laneid){
-  int col = laneid/4;
-  int row = (laneid%4)*2;
-  half2 temp[2];
-  temp[0] = __shfl_sync(0xffffffff, val, row*4 + col/2);
-  temp[1] = __shfl_sync(0xffffffff, val, (row+1)*4 + col/2);
-  if((laneid/4)%2 == 0){
-    val.x = temp[0].x;
-    val.y = temp[1].x;
-  }
-  else{
-    val.x = temp[0].y;
-    val.y = temp[1].y;
-  }
-}
 
 __device__ void save_sddmm_result(float* sum, float* sddmm_result, int tcb_id, int last_block){
   int wid = threadIdx.y;    // warp_index handling multi-dimension > 16.

@@ -345,7 +345,7 @@ __global__ void fill_edgeToRow(int *edgeToRow, int *nodePointer,
   int wid = threadIdx.y;
   int bid = blockIdx.x;
   for(int nid = bid*blockDim.y + wid; nid < num_nodes; nid += blockDim.y*gridDim.x) {
-    for (int eid = nodePointer[nid] + threadIdx.x; eid < nodePointer[nid + 1]; eid += 32) {
+    for (int eid = nodePointer[nid] + threadIdx.x; eid < nodePointer[nid + 1]; eid += gridDim.x) {
       edgeToRow[eid] = nid;
     }
   }
@@ -426,6 +426,11 @@ torch::Tensor sort_row_windows_by_tcb_count(const int* rowwindow_offset, int num
   auto sorted_row_window = torch::zeros({num_row_windows}, options_gpu);
   thrust::copy(indices.begin(), indices.end(), 
                thrust::device_pointer_cast(sorted_row_window.data_ptr<int>()));
-  
+  cudaDeviceSynchronize();
+  cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    printf("CUDA error in sort_row_windows_by_tcb_count: %s\n", cudaGetErrorString(error));
+    exit(-1);
+  }
   return sorted_row_window;
 }

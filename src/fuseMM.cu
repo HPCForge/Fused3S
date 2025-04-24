@@ -562,3 +562,41 @@
 //                           spmm_acc_frag, embedding_dim, wmma::mem_row_major);
 // }
 // #endif
+
+// Assume each warp has a 8x8 fp16 matrix in row-major order distributed among threads
+// Each thread starts with 2 consecutive fp16 values as a half2 (val)
+// This function redistributes elements among threads 
+// so that val becomes 2 consecutive fp16 values in column-major order
+__device__ void shfl_transpose_warp(half2 &val, int laneid){
+  int col = laneid/4;
+  int row = (laneid%4)*2;
+  half2 temp[2];
+  temp[0] = __shfl_sync(0xffffffff, val, row*4 + col/2);
+  temp[1] = __shfl_sync(0xffffffff, val, (row+1)*4 + col/2);
+  if((laneid/4)%2 == 0){
+    val.x = temp[0].x;
+    val.y = temp[1].x;
+  }
+  else{
+    val.x = temp[0].y;
+    val.y = temp[1].y;
+  }
+}
+
+// deprecated, replaced by storePartialSumShm and addPartialSums
+// use atomicAdd to sum up the result of SDDMM.
+__device__ void sumWarpI(int i, const uint64_t* tcbBitMap, float* sum, float* D_frag, int tcbId, bool lastBlock, int laneId){
+  uint64_t bitMask = 1ULL << (63 - laneId*2);
+  uint64_t bitMaskNext = 1ULL << (63 - laneId*2-1);
+  if(!lastBlock || i == 0){
+    int sumOffset = i*BLK_M*BLK_N;
+    for(int j=0; j< 2; j++){// 2 8x8 blocks in each 16x8 block
+      if((tcbBitMap[(tcbId+i)*2+j] & bitMask) != 0){
+        atomicAdd(&sum[sumOffset + j*BLK_N*BLK_N + laneId*2], D_frag[j*2]);
+      }
+      if((tcbBitMap[(tcbId+i)*2+j] & bitMaskNext) != 0){
+        atomicAdd(&sum[sumOffset + j*BLK_N*BLK_N + laneId*2 + 1], D_frag[j*2 + 1]);
+      }
+    }
+  }
+}

@@ -38,27 +38,26 @@ torch::Tensor
 sort_row_windows_by_tcb_count(const int* rowwindow_offset, int num_row_windows);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, 
-           torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int>
+           torch::Tensor, torch::Tensor, torch::Tensor, int>
 preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
                int num_nodes, int blockSize_h, int blockSize_w,
                torch::Tensor blockPartition_tensor,
                torch::Tensor edgeToColumn_tensor,
                torch::Tensor edgeToRow_tensor) {
-  // input tensors.
+  auto edgeList = edgeList_tensor.data_ptr<int>();
+  auto nodePointer = nodePointer_tensor.data_ptr<int>();
+  auto blockPartition = blockPartition_tensor.data_ptr<int>();
+  auto edgeToColumn = edgeToColumn_tensor.data_ptr<int>();
+  auto edgeToRow = edgeToRow_tensor.data_ptr<int>();
   auto options_gpu =
       torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-  auto edgeList = edgeList_tensor.data_ptr<int>();
-  auto blockPartition = blockPartition_tensor.data_ptr<int>();
   auto row_window_offset_tensor =
       torch::zeros({blockPartition_tensor.size(0) + 1}, options_gpu);
   auto row_window_offset = row_window_offset_tensor.data_ptr<int>();
-  auto edgeToColumn = edgeToColumn_tensor.data_ptr<int>();
   auto seg_out_tensor = torch::zeros({edgeList_tensor.size(0)}, options_gpu);
+  auto seg_out = seg_out_tensor.data_ptr<int>();
   auto blocknum = torch::zeros({1}, options_gpu);
   auto block_num = blocknum.data_ptr<int>();
-  auto edgeToRow = edgeToRow_tensor.data_ptr<int>();
-  auto nodePointer = nodePointer_tensor.data_ptr<int>();
-  auto seg_out = seg_out_tensor.data_ptr<int>();
   auto start = std::chrono::high_resolution_clock::now();
   fill_edgeToRow_cuda(edgeToRow, nodePointer, num_nodes);
   int block_counter = 0;
@@ -68,12 +67,7 @@ preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
       block_num, row_window_offset, blockSize_h, blockSize_w, num_nodes,
       edgeList_tensor.size(0), blockPartition_tensor.size(0));
   auto sorted_row_window_tensor = sort_row_windows_by_tcb_count(
-      row_window_offset_tensor.data_ptr<int>(), blockPartition_tensor.size(0));
-  auto row_window_offset_tensor_cpu = row_window_offset_tensor.to(torch::kCPU);
-  auto tb_boundaries = assign_row_to_tb(
-    row_window_offset_tensor_cpu.data_ptr<int>(), 
-    blockPartition_tensor.size(0));
-  auto tb_boundaries_tensor = torch::tensor(tb_boundaries, options_gpu);
+      row_window_offset, blockPartition_tensor.size(0));
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> elapsed_seconds = end - start;
   std::cout << "\t GPU Preprocess time: " 
@@ -89,8 +83,7 @@ preprocess_gpu(torch::Tensor edgeList_tensor, torch::Tensor nodePointer_tensor,
   return std::make_tuple(row_window_offset_tensor, sorted_row_window_tensor, 
                          tcblock_rowid_tensor, tcblocktile_id_tensor, 
                          tcblock_offset_tensor, sparse_AToX_index_tensor, 
-                         tb_boundaries_tensor, tcblock_bit_map_tensor, 
-                         block_counter);
+                         tcblock_bit_map_tensor, block_counter);
 }
 
 std::vector<torch::Tensor>

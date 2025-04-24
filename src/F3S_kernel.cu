@@ -78,10 +78,7 @@ union Half2Uint32 {
     half2 h2;
     uint32_t u32;
 };
-union Float4Uint128 {
-    float4 f4;
-    ulonglong2 ul2;
-};
+
 struct Scheduler {
   int ind = blockIdx.x;
   int targetRw;
@@ -126,30 +123,12 @@ __device__ void reduceMax(float& max, volatile int laneId){
 }
 
 // sum up "sum" for every 4 consecutive threads in a warp
-// results is only valid for the first thread in the warp
+// result is only valid for the first thread in the warp
 __device__ void reduceSum(float& sum){
   // offset = 1
   sum += __shfl_down_sync(0xFFFFFFFF, sum, 1, 4);
   // offset = 2
   sum += __shfl_down_sync(0xFFFFFFFF, sum, 2, 4);
-}
-
-// deprecated, replaced by storePartialSumShm and addPartialSums
-// use atomicAdd to sum up the result of SDDMM.
-__device__ void sumWarpI(int i, const uint64_t* tcbBitMap, float* sum, float* D_frag, int tcbId, bool lastBlock, int laneId){
-  uint64_t bitMask = 1ULL << (63 - laneId*2);
-  uint64_t bitMaskNext = 1ULL << (63 - laneId*2-1);
-  if(!lastBlock || i == 0){
-    int sumOffset = i*BLK_M*BLK_N;
-    for(int j=0; j< 2; j++){// 2 8x8 blocks in each 16x8 block
-      if((tcbBitMap[(tcbId+i)*2+j] & bitMask) != 0){
-        atomicAdd(&sum[sumOffset + j*BLK_N*BLK_N + laneId*2], D_frag[j*2]);
-      }
-      if((tcbBitMap[(tcbId+i)*2+j] & bitMaskNext) != 0){
-        atomicAdd(&sum[sumOffset + j*BLK_N*BLK_N + laneId*2 + 1], D_frag[j*2 + 1]);
-      }
-    }
-  }
 }
 
 //sum should be BLK_M*BLK_M*number of warps.
