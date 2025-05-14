@@ -1,3 +1,6 @@
+## Fused3S: Fast Sparse Attention on Tensor Cores
+Fused3S is a CUDA kernel library for sparse attention (SDDMM + Softmax + SpMM) by fusing these operations together while also leveraging the high throughput of tensor cores. The kernels are optmized for Ampere architecture with ongoing work to exploit new features introduced in Hopper.
+
 ## Dependencies
 + **Requirements**: 
 > + `CUDA/12.1`
@@ -59,4 +62,18 @@ python eval.py
 ```shell
 cd scripts/tests
 python test_f3s_accuracy.py
+```
+
+## Publication
+Fused3S is accepted to ICS'25. To cite our work:
+```bibtex
+@misc{li2025fused3sfastsparseattention,
+      title={Fused3S: Fast Sparse Attention on Tensor Cores}, 
+      author={Zitong Li and Aparna Chandramowlishwaran},
+      year={2025},
+      eprint={2505.08098},
+      archivePrefix={arXiv},
+      primaryClass={cs.DC},
+      url={https://arxiv.org/abs/2505.08098}, 
+}
 ```
