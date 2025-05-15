@@ -1,5 +1,5 @@
 ## Fused3S: Fast Sparse Attention on Tensor Cores
-Fused3S is a CUDA kernel library for sparse attention (SDDMM + Softmax + SpMM) by fusing these operations together while also leveraging the high throughput of tensor cores. The kernels are optmized for Ampere architecture with ongoing work to exploit new features introduced in Hopper.
+Fused3S is a CUDA kernel library that accelerates sparse attention by fusing Sampled Dense-Dense Matrix Multiplication (SDDMM), Softmax, and Sparse Matrix Multiplication (SpMM) into a single optimized kernel while also leveraging the high throughput of tensor cores. The kernels are optimized for Ampere architecture with ongoing work to exploit new features introduced in Hopper.
 
 ## Dependencies
 + **Requirements**: 
