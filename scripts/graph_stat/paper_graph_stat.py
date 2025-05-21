@@ -57,7 +57,7 @@ for i, dataset in enumerate(datasets):
   # Optimize GPU.
   RowWindowOffset, sortedRowWindows, TCblockRowid,\
   TCblocktileId, TCblockoffset, SparseAToXindex,\
-  TBBoundaries, TCblockBitMap, block_count = preprocess_gpu(column_index, row_pointers, num_rows, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
+  TCblockBitMap, block_count = preprocess_gpu(column_index, row_pointers, num_rows, BLK_H, BLK_W, blockPartition_cuda, edgeToColumn_cuda, edgeToRow_cuda)
   df[i, 3] = block_count
 
   RowWindowOffset = RowWindowOffset.cpu().numpy()

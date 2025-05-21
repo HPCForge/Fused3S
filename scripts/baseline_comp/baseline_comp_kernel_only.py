@@ -428,7 +428,7 @@ def route_f3s(args, graphInfo, perf):
 
   if run_1tb1tcb:
     RowWindowOffset, _, _, _, _,\
-    SparseAToXindex, _, TCblockBitMap, _ = f3s_preprocess_dataset(args, graphInfo, BLK_W=8)
+    SparseAToXindex, TCblockBitMap, _ = f3s_preprocess_dataset(args, graphInfo, BLK_W=8)
     graphInfo.f3s_flop(RowWindowOffset, args.embedding_dim, use_1tb1tcb=True)
     apply_softmax = True
     save_sddmm_result = False
@@ -448,7 +448,7 @@ def route_f3s(args, graphInfo, perf):
 
   if run_1tb1rw_variants:
     RowWindowOffset, sortedRowWindows, _, _, _ ,\
-    SparseAToXindex, _, TCblockBitMap, _ = f3s_preprocess_dataset(args, graphInfo, BLK_W=16)
+    SparseAToXindex, TCblockBitMap, _ = f3s_preprocess_dataset(args, graphInfo, BLK_W=16)
     graphInfo.f3s_flop(RowWindowOffset, args.embedding_dim, use_1tb1tcb=False)
     Q = graphInfo.Q_host.half().cuda()
     K = graphInfo.K_host.half().cuda()

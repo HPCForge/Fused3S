@@ -5,18 +5,6 @@ import F3S
 import time
 import torch.nn.functional as F
 import argparse
-def convert_row_major_nz_to_block_row_major(A, BLK_H, BLK_W):
-  nnz = torch.empty(0, dtype= A.dtype, device=A.device)
-  n_block_per_row = (A.shape[1] + BLK_W - 1) // BLK_W
-  n_block_per_col = (A.shape[0] + BLK_H - 1) // BLK_H
-  for i in range(n_block_per_col):
-    for j in range(n_block_per_row):
-      row = i * BLK_H
-      col = j * BLK_W
-      block = A[row:row+BLK_H, col:col+BLK_W]
-      block = block[block!=0]
-      nnz = torch.cat((nnz, block))
-  return nnz
 
 # mat is a 2D pytorch tensor. this fucntion does the following:
 # 1. divided it into row blocks of height BLK_H. If the last row block is not full, pad it with zeros.
@@ -126,8 +114,6 @@ def main(args):
   half_v_float_final = []
   f3s_v_true_fp32_sddmm = []
   f3s_v_true_fp32_final = []
-  # np.random.seed(26)
-  # torch.manual_seed(26)
   for n in range(n_test):
     np.random.seed(n)
     torch.manual_seed(n)
@@ -152,11 +138,6 @@ def main(args):
     K = F.pad(K, (0, col_padding_len, 0, row_padding_len), "constant", 0)
     V = F.pad(V, (0, col_padding_len, 0, row_padding_len), "constant", 0)
     Q_half = Q.to(torch.float16)
-    # for i in range(feature_size//8):
-    #   print(Q_half[:16, i*8:(i+1)*8])
-    # print("--------------------------------")
-    # for i in range(feature_size//8):
-    #   print(Q_half[16:32, i*8:(i+1)*8])
     print(f"Q_half.shape: {Q_half.shape}")
     K_half = K.to(torch.float16)
     print(f"K_half.shape: {K_half.shape}")
@@ -195,8 +176,8 @@ def main(args):
     edgeToRow_cuda  = edgeToRow.cuda()
     indices = torch.IntTensor(A_csr_h.indices).cuda()
     indptr = torch.IntTensor(A_csr_h.indptr).cuda()
-    RowWindowOffset, sortedRowWindows, TCblockRowid,_, _,\
-    SparseAToXindex, TBBoundaries, TCblockBitMap, _ = F3S.preprocess_gpu(indices, indptr, size, 
+    RowWindowOffset, sortedRowWindows, TCblockRowid, _, _,\
+    SparseAToXindex, TCblockBitMap, _ = F3S.preprocess_gpu(indices, indptr, size, 
                                                                   BLK_H, BLK_W, 
                                                                   blockPartition_cuda, 
                                                                   edgeToColumn_cuda, 
@@ -216,11 +197,6 @@ def main(args):
         print("using 1tb1rw_scheduled_permuteV")
         time, fusedR, sddmm_result = F3S.f3s_1tb1rw_scheduled_permuteV(RowWindowOffset, sortedRowWindows, SparseAToXindex, TCblockBitMap, 
                                                           size, Q_half, K_half, V_half, nWarpPerBlock)
-      elif args.alg == '1tbnrw':
-        print("using 1tbnrw")
-        time, sddmm_result = F3S.sddmm_1tbnrw(RowWindowOffset, TBBoundaries, TCblockRowid, SparseAToXindex, TCblockBitMap, 
-                                          size, Q_half, K_half, nWarpPerBlock)[0]
-        fusedR = None
       elif args.alg == '1tb1tcb':
         print("using 1tb1tcb")
         time, fusedR, sddmm_result = F3S.f3s_1tb1tcb(RowWindowOffset, SparseAToXindex, TCblockBitMap, 
@@ -236,11 +212,6 @@ def main(args):
     if fusedR is not None:
       print(fusedR.shape)
       print(true.shape)
-      # for i in range(1):
-      #   print(fusedR[:, :])
-      # print("--------------------------------")
-      # for i in range(1):
-      #   print(true[:, :])
 
       diff = fusedR - true
       max_diff = torch.max(torch.abs(diff))
