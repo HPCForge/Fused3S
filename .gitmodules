@@ -1,9 +1,6 @@
 [submodule "baselines/DF-GNN"]
 	path = baselines/DF-GNN
 	url = git@github.com:zli96/DF-GNN.git
-[submodule "baselines/magicube"]
-	path = baselines/magicube
-	url = git@github.com:zli96/Magicube_int16.git
 [submodule "baselines/flashSparse"]
 	path = baselines/flashSparse
 	url = git@github.com:zli96/flashSparse.git
