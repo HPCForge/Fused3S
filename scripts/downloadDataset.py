@@ -30,7 +30,7 @@ def download_pyg_dataset(path, output_path, name='Github'):
         dataset = Reddit(root=temp_path)
     elif name == 'EllipticBitcoinDataset':
         dataset = EllipticBitcoinDataset(root=temp_path)
-    elif name in ['Pubmed', 'Cora', 'Citeseer']:
+    elif name in ['PubMed', 'Cora', 'CiteSeer']:
         dataset = Planetoid(root=temp_path, name=name)
     else:
         import shutil
@@ -84,7 +84,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     for size in ['medium', 'small']:
         download_igb_dataset(args.root, args.output_path, size=size)
-    for name in ['AmazonProducts', 'GitHub', 'Yelp', 'Pubmed', 'Cora', 'Citeseer']:
+    for name in ['AmazonProducts', 'GitHub', 'Yelp', 'PubMed', 'Cora', 'CiteSeer']:
         download_pyg_dataset(args.root, args.output_path, name=name)
     for name in ['ogbn-products']:
         download_ogb_dataset(args.root, args.output_path, name=name)
