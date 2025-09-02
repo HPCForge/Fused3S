@@ -345,7 +345,7 @@ __global__ void fill_edgeToRow(int *edgeToRow, int *nodePointer,
   int wid = threadIdx.y;
   int bid = blockIdx.x;
   for(int nid = bid*blockDim.y + wid; nid < num_nodes; nid += blockDim.y*gridDim.x) {
-    for (int eid = nodePointer[nid] + threadIdx.x; eid < nodePointer[nid + 1]; eid += gridDim.x) {
+    for (int eid = nodePointer[nid] + threadIdx.x; eid < nodePointer[nid + 1]; eid += blockDim.x) {
       edgeToRow[eid] = nid;
     }
   }
