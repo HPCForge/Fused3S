@@ -28,7 +28,7 @@ The kernels are optimized for Ampere architecture with ongoing work to exploit n
 git clone --recursive git@github.com:HPCForge/Fused3S.git
 ```
 
-**To build using Docker image**  
+**Build using Docker image**  
 
 We provide a dockerfile to build the environment needed to run F3S and baseline methods.
 To build, clone this repository and its submodules. 
@@ -37,7 +37,7 @@ Run the following command in the cloned F3S directory.
 docker build -t fused3s -f dockerfile .
 ```
 
-**To build from source**
+**Build from source**
   
 Assuming the dependencies are satisfied.
 ```shell
@@ -51,6 +51,40 @@ cd baselines/flashSparse/FlashSparse
 source compile.sh
 ```
 
+## How to use Fused3S
+
+```python
+import F3S
+
+### Preprocess sparse mask A in CSR format into TC blocks (size BLK_H x BLK_W)
+num_row_windows = (A.size + BLK_H - 1) // BLK_H
+edgeToColumn = torch.zeros(A.nnz, dtype=torch.int, device='cuda')
+edgeToRow = torch.zeros(A.nnz, dtype=torch.int, device='cuda')
+blockPartition = torch.zeros(num_row_windows, dtype=torch.int, device='cuda')
+indices = torch.IntTensor(A.indices).cuda()
+indptr = torch.IntTensor(A.indptr).cuda()
+RowWindowOffset, sortedRowWindows, TCblockRowid, _, _,\
+SparseAToXindex, TCblockBitMap, _ = F3S.preprocess_gpu(indices, indptr, size, 
+                                                       BLK_H, BLK_W, 
+                                                       blockPartition, 
+                                                       edgeToColumn, 
+                                                       edgeToRow)
+
+### Q,K,V should be 2D half precision torch tensor of shape [A.size, embeddingDim]
+### nWarpPerBlock is tunable, we recommend to use 8 as a default
+time, fusedR = F3S.f3s_1tb1rw_scheduled_permuteV(RowWindowOffset, sortedRowWindows,
+                                                 SparseAToXindex, TCblockBitMap, 
+                                                 size, Q_half, K_half, V_half,
+                                                 nWarpPerBlock)
+### Other variantion of Fused3S takes in similar sets of parameters
+```
+
+## Tests and reproducibility
+**Datasets**
+
+Full graph datasets can be collected by running `scripts/downloadDataset.py`.
+Datasets less easy to find is included in `dataset/`
+
 **To profile individual kernels**
 ```shell
 ncu --set full -f --import-source yes --source-folders F3S/src --export f3s_pubmed.ncu-rep --kernel-name "regex:f3sKernel1tb1rwScheduledPermutedQKVScaleQK" python baseline_comp_kernel_only.py -d pubmed -m f3s -a f3s_1tb1rw_scheduled_permuteV
@@ -61,12 +95,6 @@ ncu --set full -f --import-source yes --source-folders F3S/src --export f3s_pubm
 cd scripts/tests
 python test_f3s_accuracy.py
 ```
-
-## Tests and reproducibility
-**Datasets**
-
-Full graph datasets can be collected by running `scripts/downloadDataset.py`.
-Datasets less easy to find is included in `dataset/`
 
 **Reproduce Figure 5 results**
 ```shell
@@ -95,6 +123,7 @@ If you have found this codebase useful in your research, please cite:
   author={Li, Zitong and Chandramowlishwaran, Aparna},
   booktitle={Proceedings of the 39th ACM International Conference on Supercomputing},
   pages={104--118},
-  year={2025}
+  year={2025},
+  doi = {10.1145/3721145.3730430}
 }
 ```
