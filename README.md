@@ -18,8 +18,8 @@ The kernels are optimized for Ampere architecture with ongoing work to exploit n
 > + `CUDA/12.1`
 > + `GCC/11.2`
 > + `Pytorch/2.4.0`
-> + `Dgl/2.4.0`
-> + `PyG/2.6.1`
+> + `Dgl/2.4.0` (optional)
+> + `PyG/2.6.1` (optional)
 > + Nvidia A30/H100 GPU
 
 **Clone this repo and submodules**
@@ -41,8 +41,10 @@ docker build -t fused3s -f dockerfile .
   
 Assuming the dependencies are satisfied.
 ```shell
+# To build Fused3S itself
 cd src
 source build.sh
+# To build DF-GNN and FlashSparse as baselines
 cd baselines/DF-GNN/
 source install.sh
 cd baselines/flashSparse/FlashSparse
