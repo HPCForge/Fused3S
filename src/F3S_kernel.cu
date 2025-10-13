@@ -984,14 +984,6 @@ __device__ void storeOFragShm2(volatile float* O_frag, float* dynShm) {
   for(int i = 0; i < 8; i++){
     dynShm[i*32] = O_frag[i];
   }
-  // dynShm[0] = O_frag[0];
-  // dynShm[32] = O_frag[1];
-  // dynShm[64] = O_frag[2];
-  // dynShm[96] = O_frag[3];
-  // dynShm[128] = O_frag[4];
-  // dynShm[160] = O_frag[5];
-  // dynShm[192] = O_frag[6];
-  // dynShm[224] = O_frag[7];
 }
 
 __global__ void f3sKernel1tb1rw(

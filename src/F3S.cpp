@@ -227,31 +227,6 @@ f3s1tb1rwScheduledPermuteV(
     torch::Tensor tcbBitMap,
     int nNodes,
     torch::Tensor Q, torch::Tensor K, torch::Tensor V,
-    int nWarpPerBlock){
-  int embeddingDim = Q.size(1);
-  std::vector<torch::Tensor> result;
-  result = f3sCuda1tb1rwScheduled(rowWindowOffset, 
-                                  sortedRowWindows, 
-                                  sparseAToXidx, 
-                                  tcbBitMap, 
-                                  nNodes, 
-                                  embeddingDim, 
-                                  Q, K, V, 
-                                  nWarpPerBlock,
-                                  true,
-                                  1.0);
-  return result;
-}
-
-// same as f3s1tb1rwScheduled except permute V = true
-std::vector<torch::Tensor>
-f3s1tb1rwScheduledPermuteVScaleQK(
-    torch::Tensor rowWindowOffset,
-    torch::Tensor sortedRowWindows,
-    torch::Tensor sparseAToXidx,
-    torch::Tensor tcbBitMap,
-    int nNodes,
-    torch::Tensor Q, torch::Tensor K, torch::Tensor V,
     float scalingFactor,
     int nWarpPerBlock){
   int embeddingDim = Q.size(1);
@@ -296,11 +271,67 @@ f3s1tb1tcb(torch::Tensor rowWindowOffset,
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("preprocess_gpu", &preprocess_gpu, "Preprocess Step on (CUDA)");
-  m.def("f3s_1tb1tcb", &f3s1tb1tcb, "fused3S 1tb1tcb");
-  m.def("f3s_1tb1rw", &f3s1tb1rw, "fused3S 1tb1rw");
-  m.def("f3s_1tb1rw_scheduled", &f3s1tb1rwScheduled, "fused3S 1tb1rw scheduled");
-  m.def("f3s_1tb1rw_scheduled_permuteV", &f3s1tb1rwScheduledPermuteV, "fused3S 1tb1rw scheduled permuteV");
-  m.def("f3s_1tb1rw_scheduled_permuteV_scaleQK", &f3s1tb1rwScheduledPermuteVScaleQK, "fused3S 1tb1rw scheduled permuteV scaleQK");
+  m.def("preprocess_gpu", 
+        &preprocess_gpu,
+        py::arg("edgeList_tensor"),
+        py::arg("nodePointer_tensor"),
+        py::arg("num_nodes"),
+        py::arg("blockSize_h"),
+        py::arg("blockSize_w"),
+        py::arg("blockPartition_tensor"),
+        py::arg("edgeToColumn_tensor"),
+        py::arg("edgeToRow_tensor"),
+        "Preprocess Step on (CUDA)");
+
+  m.def("f3s_1tb1tcb", &f3s1tb1tcb,
+        py::arg("rowWindowOffset"),
+        py::arg("sparseAToXidx"),
+        py::arg("tcbBitMap"),
+        py::arg("nNodes"),
+        py::arg("Q"),
+        py::arg("K"),
+        py::arg("V"),
+        py::arg("applySoftmax"),
+        py::arg("saveSddmmResult") = false,
+        "fused3S 1tb1tcb");
+
+  m.def("f3s_1tb1rw", &f3s1tb1rw,
+        py::arg("rowWindowOffset"),
+        py::arg("sparseAToXidx"),
+        py::arg("tcbBitMap"),
+        py::arg("nNodes"),
+        py::arg("Q"),
+        py::arg("K"),
+        py::arg("V"),
+        py::arg("nWarpPerBlock") = 8,
+        py::arg("applySoftmax") = true,
+        py::arg("checkSMActiveTime") = false,
+        "fused3S 1tb1rw");
+
+  m.def("f3s_1tb1rw_scheduled", &f3s1tb1rwScheduled,
+        py::arg("rowWindowOffset"),
+        py::arg("sortedRowWindows"),
+        py::arg("sparseAToXidx"),
+        py::arg("tcbBitMap"),
+        py::arg("nNodes"),
+        py::arg("Q"),
+        py::arg("K"),
+        py::arg("V"),
+        py::arg("nWarpPerBlock") = 8,
+        py::arg("checkSMActiveTime") = false,
+        "fused3S 1tb1rw scheduled");
+
+  m.def("f3s_1tb1rw_scheduled_permuteV", &f3s1tb1rwScheduledPermuteV,
+        py::arg("rowWindowOffset"),
+        py::arg("sortedRowWindows"),
+        py::arg("sparseAToXidx"),
+        py::arg("tcbBitMap"),
+        py::arg("nNodes"),
+        py::arg("Q"),
+        py::arg("K"),
+        py::arg("V"),
+        py::arg("scalingFactor") = 1.0,
+        py::arg("nWarpPerBlock") = 8,
+        "fused3S 1tb1rw scheduled permuteV");
 }
 
