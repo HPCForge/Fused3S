@@ -63,6 +63,11 @@ python test_f3s_accuracy.py
 ```
 
 ## Tests and reproducibility
+**Datasets**
+
+Full graph datasets can be collected by running `scripts/downloadDataset.py`.
+Datasets less easy to find is included in `dataset/`
+
 **Reproduce Figure 5 results**
 ```shell
 cd scripts/baseline_comp
