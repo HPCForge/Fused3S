@@ -1,8 +1,20 @@
-## Fused3S: Fast Sparse Attention on Tensor Cores
-Fused3S is a CUDA kernel library that accelerates sparse attention by fusing Sampled Dense-Dense Matrix Multiplication (SDDMM), Softmax, and Sparse Matrix Multiplication (SpMM) into a single optimized kernel while also leveraging the high throughput of tensor cores. The kernels are optimized for Ampere architecture with ongoing work to exploit new features introduced in Hopper.
+## Fused3S
 
-## Dependencies
-+ **Requirements**: 
+This repository provides the official implementation of Fused3S from the following paper.
+
+Fused3S: Fast Sparse Attention on Tensor Cores  
+Zitong Li, Aparna Chandramowlishwaran  
+Paper: https://dl.acm.org/doi/full/10.1145/3721145.3730430
+
+Sparse attention forward pass on H100 for single graph and batched graphs datasets.
+<img width="7089" height="1661" alt="speedup_full_GH200" src="https://github.com/user-attachments/assets/cf4fd105-be0d-49c2-bfb7-413b87640795" />
+<img width="7113" height="1661" alt="speedup_batched_GH200" src="https://github.com/user-attachments/assets/20d1bd13-3fc6-4129-b5da-66936a2f0e88" />
+
+The kernels are optimized for Ampere architecture with ongoing work to exploit new features introduced in Hopper.
+
+## Installation
+
+**Dependencies**
 > + `CUDA/12.1`
 > + `GCC/11.2`
 > + `Pytorch/2.4.0`
@@ -10,12 +22,14 @@ Fused3S is a CUDA kernel library that accelerates sparse attention by fusing Sam
 > + `PyG/2.6.1`
 > + Nvidia A30/H100 GPU
 
-## Clone this repo and submodules
+**Clone this repo and submodules**
+  
 ```shell
 git clone --recursive git@github.com:HPCForge/Fused3S.git
 ```
 
-## Build using Docker image
+**To build using Docker image**  
+
 We provide a dockerfile to build the environment needed to run F3S and baseline methods.
 To build, clone this repository and its submodules. 
 Run the following command in the cloned F3S directory.
@@ -23,7 +37,8 @@ Run the following command in the cloned F3S directory.
 docker build -t fused3s -f dockerfile .
 ```
 
-## Build from source
+**To build from source**
+  
 Assuming the dependencies are satisfied.
 ```shell
 cd src
@@ -34,46 +49,45 @@ cd baselines/flashSparse/FlashSparse
 source compile.sh
 ```
 
-## Reproduce results in Figure 5
+**To profile individual kernels**
+```shell
+ncu --set full -f --import-source yes --source-folders F3S/src --export f3s_pubmed.ncu-rep --kernel-name "regex:f3sKernel1tb1rwScheduledPermutedQKVScaleQK" python baseline_comp_kernel_only.py -d pubmed -m f3s -a f3s_1tb1rw_scheduled_permuteV
+```
+
+**To verify correctness**
+```shell
+cd scripts/tests
+python test_f3s_accuracy.py
+```
+
+## Tests and reproducibility
+**Reproduce Figure 5 results**
 ```shell
 cd scripts/baseline_comp
 python baseline_comp_kernel_only.py -d all -m all -a all --use_event_timer
 ```
 
-## Reproduce results in Figure 6
+**Reproduce Figure 6 results**
 ```shell
 cd scripts/baseline_comp
 python baseline_comp_kernel_only.py -d reddit -m f3s -a f3s_1tb1rw --check_sm_active_time
 python baseline_comp_kernel_only.py -d reddit -m f3s -a f3s_1tb1rw_scheduled --check_sm_active_time
 ```
 
-## To profile individual kernel with ncu
-```shell
-ncu --set full -f --import-source yes --source-folders F3S/src --export f3s_pubmed.ncu-rep --kernel-name "regex:f3sKernel1tb1rwScheduledPermutedQKVScaleQK" python baseline_comp_kernel_only.py -d pubmed -m f3s -a f3s_1tb1rw_scheduled_permuteV
-```
-
-## Reproduce results in Figure 7
+**Reproduce Figure 7 results**
 ```shell
 cd baselines/graphtransformer
 python eval.py
 ```
 
-## Verifying correctness
-```shell
-cd scripts/tests
-python test_f3s_accuracy.py
-```
-
-## Publication
-Fused3S is accepted to ICS'25. To cite our work:
+## Citation
+If you have found this codebase useful in your research, please cite:
 ```bibtex
-@misc{li2025fused3sfastsparseattention,
-      title={Fused3S: Fast Sparse Attention on Tensor Cores}, 
-      author={Zitong Li and Aparna Chandramowlishwaran},
-      year={2025},
-      eprint={2505.08098},
-      archivePrefix={arXiv},
-      primaryClass={cs.DC},
-      url={https://arxiv.org/abs/2505.08098}, 
+@inproceedings{li2025fused3s,
+  title={Fused3S: Fast Sparse Attention on Tensor Cores},
+  author={Li, Zitong and Chandramowlishwaran, Aparna},
+  booktitle={Proceedings of the 39th ACM International Conference on Supercomputing},
+  pages={104--118},
+  year={2025}
 }
 ```
